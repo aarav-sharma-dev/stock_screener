@@ -283,6 +283,19 @@ class SchwabClient:
             json=json_body,
             timeout=45,
         )
+        for attempt in range(3):
+            if resp.status_code != 429:
+                break
+            wait = float(resp.headers.get("Retry-After") or (1 + attempt))
+            time.sleep(min(max(wait, 0.5), 8))
+            resp = requests.request(
+                method,
+                url,
+                headers=headers,
+                params=params,
+                json=json_body,
+                timeout=45,
+            )
         if resp.status_code == 401:
             # Force refresh once
             with self._lock:
@@ -415,6 +428,37 @@ def _candles_to_frame(payload: dict):
     return pd.DataFrame(rows).set_index("datetime").sort_index()
 
 
+def to_schwab_symbol(symbol: str) -> str:
+    """Map a screener ticker onto a Schwab market-data symbol.
+
+    Class shares use a slash (``BRK-B`` → ``BRK/B``). Index quotes use the
+    Schwab ``$`` prefix.
+    """
+    s = symbol.strip().upper()
+    if s in {"^VIX", "VIX", "$VIX"}:
+        return "$VIX"
+    if s in {"^GSPC", "^SPX", "SPX", "$SPX"}:
+        return "$SPX"
+    return s.replace("-", "/")
+
+
+def _year_period_for_span(span_days: int) -> int:
+    """Schwab ``periodType=year`` only accepts 1, 2, 3, 5, 10, 15, 20."""
+    if span_days <= 370:
+        return 1
+    if span_days <= 2 * 370:
+        return 2
+    if span_days <= 3 * 370:
+        return 3
+    if span_days <= 5 * 370:
+        return 5
+    if span_days <= 10 * 370:
+        return 10
+    if span_days <= 15 * 370:
+        return 15
+    return 20
+
+
 def price_history_daily(
     symbol: str,
     *,
@@ -427,11 +471,11 @@ def price_history_daily(
     client = client or get_client()
     end = end or pd.Timestamp.now(tz="UTC")
     start = start or (end - pd.Timedelta(days=365))
-    # Use date range; period still required by API — use year/1 as shell
+    span_days = max(1, int((pd.Timestamp(end) - pd.Timestamp(start)).days))
     payload = client.get_price_history(
         symbol,
         period_type="year",
-        period=1,
+        period=_year_period_for_span(span_days),
         frequency_type="daily",
         frequency=1,
         start_ms=_ms(start),

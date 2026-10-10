@@ -266,6 +266,7 @@ def run_screener(
             universe,
             history_days=hist_days,
             chunk_size=cfg.price_chunk_size,
+            source=cfg.price_source,
         )
         if prices.empty and mode not in {"politicians", "trump"}:
             return empty, empty, empty, empty, empty, empty, empty, market
@@ -598,7 +599,12 @@ def _run_pead(
     if not pre:
         return pd.DataFrame()
 
-    spy_df = download_prices(["SPY"], history_days=max(cfg.history_days, 120), chunk_size=1)
+    spy_df = download_prices(
+        ["SPY"],
+        history_days=max(cfg.history_days, 120),
+        chunk_size=1,
+        source=cfg.price_source,
+    )
     spy_close = series_for(spy_df, "Close", "SPY").dropna()
     if spy_close.empty:
         logger.warning("PEAD: SPY download failed; cannot compute EAR")
@@ -758,6 +764,7 @@ def _run_athdip(
         interval="4h",
         period=cfg.athdip_intraday_period,
         chunk_size=min(40, cfg.price_chunk_size),
+        source=cfg.price_source,
     )
     rows: list[ScreenRow] = []
     for ticker, tech, ath, pct_ath, prior_high, days_since, setup_ok in candidates:

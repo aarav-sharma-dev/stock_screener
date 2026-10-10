@@ -23,6 +23,7 @@ source .venv/bin/activate
 # 1) Live screen (writes output/screen_*.csv)
 stock-screener --mode all --universe sp500 --limit 80 --top 25 \
   --allow-below-200 --no-reddit --no-grok --no-trump-x \
+  --price-source schwab \
   --output output/screen.csv 2>&1 | tee output/run_today.log
 
 # 2) Build focus CSV + Cursor canvas + wiki section (+ new-symbol alerts)
@@ -51,8 +52,10 @@ After each dashboard build, `scripts/alert_new_signals.py` diffs current
 - Channels: stdout always; macOS Notification Center on Darwin; Slack if
   `SCREENER_SLACK_WEBHOOK` or `SLACK_WEBHOOK_URL` is set in `.env`.
 
-Near-real-time: on the VM cron, mid-day `*/30` runs **Schwab** athdip watch;
-full Yahoo screen runs at **06:00** and **19:00** CT (see README cron section).
+Near-real-time: on the VM cron, mid-day `*/30` runs **Schwab** athdip watch.
+Full screens at **06:00** and **19:00** CT use `--price-source schwab` (Yahoo only
+when a symbol's Schwab history is missing or short). News, fundamentals, and
+earnings dates stay on Yahoo.
 Locally you can still use Cursor `/loop 30m` with this skill or:
 
 ```bash

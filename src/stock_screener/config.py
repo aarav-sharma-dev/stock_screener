@@ -136,6 +136,10 @@ class ScreenerConfig:
     # Curated 13F managers — soft social overlay (lagged quarterly holdings)
     enable_institutions: bool = True
     institutions_weight: float = 0.30  # share of social when ≥1 manager holds
+    # OHLCV for a screen run. "schwab" tries Schwab first and uses Yahoo only
+    # for symbols Schwab did not return. News, fundamentals, and earnings
+    # dates stay on Yahoo either way. Backtests keep the default "yahoo".
+    price_source: str = "yahoo"
 
 
 DEFAULT_CONFIG = ScreenerConfig()

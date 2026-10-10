@@ -92,6 +92,10 @@ stock-screener --mode athdip --universe sp500 --limit 80 --top 25
 
 # Post-earnings drift watchlist (EPS surprise ≥5% + reaction ≥3% vs SPY, ≤15 sessions old)
 stock-screener --mode pead --universe sp500 --no-news
+
+# Full scan the cron runs at 06:00 and 19:00 CT: Schwab OHLCV, Yahoo fills gaps
+stock-screener --mode all --universe sp500 --limit 80 --top 25 \
+  --allow-below-200 --no-reddit --no-grok --no-trump-x --price-source schwab
 ```
 
 Politician freshness weight: `freshness = max(0, 1 - filed_after_days/45)` then  
@@ -127,9 +131,9 @@ CRON_TZ=America/Chicago
 
 | When (CT) | Mode |
 |-----------|------|
-| **06:00** | Full Yahoo screen + dashboard (refresh `screen_athdip.csv` / focus) |
+| **06:00** | Full screen + dashboard. Prices from **Schwab**, Yahoo only if a symbol is missing (`--price-source schwab`). Refreshes `screen_athdip.csv` / focus |
 | **06:30–18:30** `*/30` | **Schwab** athdip RSI watch only (`--source screen --no-compare`) |
-| **19:00** | Full Yahoo screen + dashboard (EOD new-symbol Slack) |
+| **19:00** | Same full screen again (EOD new-symbol Slack) |
 
 Deploy after `git pull` on the VM:
 

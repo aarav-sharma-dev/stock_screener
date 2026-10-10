@@ -185,6 +185,15 @@ def build_parser() -> argparse.ArgumentParser:
         help="Skip PEAD in --mode all (saves ~1–2 min of earnings-date lookups)",
     )
     p.add_argument(
+        "--price-source",
+        choices=("yahoo", "schwab"),
+        default="yahoo",
+        help=(
+            "OHLCV source. schwab uses Yahoo only when a symbol comes back "
+            "short or empty (news, fundamentals, and earnings stay on Yahoo)"
+        ),
+    )
+    p.add_argument(
         "--allow-below-200",
         action="store_true",
         help="Support baseline: allow below SMA200 (risk-off still forces above)",
@@ -257,6 +266,7 @@ def main(argv: list[str] | None = None) -> int:
         enable_x_quote_news=not args.no_x_quote_news,
         enable_polymarket=not args.no_polymarket,
         enable_institutions=not args.no_institutions,
+        price_source=args.price_source,
     )
 
     (

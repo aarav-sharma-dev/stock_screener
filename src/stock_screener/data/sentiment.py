@@ -70,7 +70,7 @@ def _regime_for(label: str, config: ScreenerConfig) -> RegimeParams:
 
 def assess_market_sentiment(config: ScreenerConfig) -> MarketSentiment:
     """Long-only market bias + regime params from free ^VIX data."""
-    vix = latest_vix()
+    vix = latest_vix(source=getattr(config, "price_source", "yahoo"))
     if vix is None:
         label = "neutral"
         score = 50.0

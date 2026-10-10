@@ -7,9 +7,9 @@
 #   0 19 * * 1-5       /home/asharma/bin/stock-screener-alert.sh
 #
 # Behavior:
-#   06:00 CT (Mon–Fri)     → full Yahoo screen + dashboard (refresh watchlist)
+#   06:00 CT (Mon–Fri)     → full screen + dashboard (Schwab prices, Yahoo backup)
 #   other */30 06–18 CT    → Schwab athdip RSI watch only (realtime crosses)
-#   19:00 CT               → full Yahoo screen + dashboard again (EOD)
+#   19:00 CT               → full screen + dashboard again (EOD)
 #
 # Env (optional):
 #   SCREENER_ROOT          repo path (default: auto-detect)
@@ -104,7 +104,7 @@ FORCE_FULL="${SCREENER_FORCE_FULL:-0}"
 FORCE_SCHWAB="${SCREENER_FORCE_SCHWAB:-0}"
 
 run_full_screen() {
-  log "MODE=full Yahoo screen + dashboard (universe refresh + new-symbol Slack)"
+  log "MODE=full screen (Schwab prices, Yahoo backup) + dashboard"
   if [[ -x "$ROOT/.venv/bin/stock-screener" ]]; then
     SCREENER_BIN="$ROOT/.venv/bin/stock-screener"
   elif command -v stock-screener >/dev/null 2>&1; then
@@ -115,6 +115,7 @@ run_full_screen() {
 
   $SCREENER_BIN --mode all --universe sp500 --limit 80 --top 25 \
     --allow-below-200 --no-reddit --no-grok --no-trump-x \
+    --price-source schwab \
     --output output/screen.csv \
     2>&1 | tee -a "$LOG" || log "WARN: screener exited $?"
 
