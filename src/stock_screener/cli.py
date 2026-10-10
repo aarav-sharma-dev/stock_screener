@@ -50,11 +50,15 @@ def build_parser() -> argparse.ArgumentParser:
             "politicians",
             "trump",
             "athdip",
+            "pead",
             "both",
             "all",
         ),
         default="all",
-        help="Screen mode (default: all). athdip = recent multi-year ATH + 4h RSI dip",
+        help=(
+            "Screen mode (default: all). athdip = recent multi-year ATH + 4h RSI dip; "
+            "pead = post-earnings drift (EPS surprise + positive reaction)"
+        ),
     )
     p.add_argument("--limit", type=int, default=None, help="Cap universe size")
     p.add_argument("--top", type=int, default=25, help="Rows to print per mode")
@@ -153,6 +157,34 @@ def build_parser() -> argparse.ArgumentParser:
         help="Athdip: min 4h RSI over last N calendar days (default 5; catches mid-week dips)",
     )
     p.add_argument(
+        "--pead-max-sessions",
+        type=int,
+        default=15,
+        help="PEAD: entry window in sessions after the reaction day (default 15)",
+    )
+    p.add_argument(
+        "--pead-min-surprise",
+        type=float,
+        default=5.0,
+        help="PEAD: min EPS surprise %% vs Yahoo consensus (default 5)",
+    )
+    p.add_argument(
+        "--pead-min-ear",
+        type=float,
+        default=3.0,
+        help="PEAD: min earnings-announcement return vs SPY, close[R-1]→close[R+1] (default 3)",
+    )
+    p.add_argument(
+        "--pead-require-drift",
+        action="store_true",
+        help="PEAD: also require last close ≥ entry close (drift still intact)",
+    )
+    p.add_argument(
+        "--no-pead",
+        action="store_true",
+        help="Skip PEAD in --mode all (saves ~1–2 min of earnings-date lookups)",
+    )
+    p.add_argument(
         "--allow-below-200",
         action="store_true",
         help="Support baseline: allow below SMA200 (risk-off still forces above)",
@@ -215,6 +247,11 @@ def main(argv: list[str] | None = None) -> int:
         athdip_fresh_high_days=args.athdip_fresh_days,
         athdip_max_days_since_ath=args.athdip_max_ath_age,
         athdip_rsi_lookback_days=args.athdip_rsi_lookback,
+        enable_pead=not args.no_pead,
+        pead_max_sessions_since_report=args.pead_max_sessions,
+        pead_min_surprise_pct=args.pead_min_surprise,
+        pead_min_ear_pct=args.pead_min_ear,
+        pead_require_above_entry=args.pead_require_drift,
         enable_grok=not args.no_grok,
         grok_top_n=args.grok_top,
         enable_x_quote_news=not args.no_x_quote_news,
@@ -222,7 +259,16 @@ def main(argv: list[str] | None = None) -> int:
         enable_institutions=not args.no_institutions,
     )
 
-    support_df, catalyst_df, fund_df, pol_df, trump_df, athdip_df, market = run_screener(
+    (
+        support_df,
+        catalyst_df,
+        fund_df,
+        pol_df,
+        trump_df,
+        athdip_df,
+        pead_df,
+        market,
+    ) = run_screener(
         config=config,
         tickers=tickers,
         fetch_news=not args.no_news,
@@ -253,6 +299,7 @@ def main(argv: list[str] | None = None) -> int:
         "politicians",
         "trump",
         "athdip",
+        "pead",
     }
 
     if args.mode in {"support", "both", "all"}:
@@ -472,6 +519,39 @@ def main(argv: list[str] | None = None) -> int:
                 args.top,
             )
             print(f"Saved {len(athdip_df)} rows → {path}")
+
+    if args.mode == "pead" or (args.mode == "all" and not args.no_pead):
+        print(
+            f"\n=== PEAD (EPS surprise ≥ {args.pead_min_surprise:.0f}% · "
+            f"EAR ≥ {args.pead_min_ear:.0f}% vs SPY · ≤{args.pead_max_sessions} sessions since print) ==="
+        )
+        if pead_df.empty:
+            print(
+                "No names passed PEAD filters. Outside earnings season this is normal; "
+                "try --pead-min-ear 2 --pead-max-sessions 25 for a wider list."
+            )
+        else:
+            any_rows = True
+            path = _save(pead_df, args.output, "pead", single and args.mode == "pead")
+            _print_table(
+                pead_df,
+                [
+                    "ticker",
+                    "price",
+                    "reaction_date",
+                    "sessions_since_reaction",
+                    "surprise_pct",
+                    "ear_pct",
+                    "gap_pct",
+                    "since_entry_pct",
+                    "rsi14",
+                    "sma_regime",
+                    "composite",
+                    "why",
+                ],
+                args.top,
+            )
+            print(f"Saved {len(pead_df)} rows → {path}")
 
     return 0 if any_rows else 1
 

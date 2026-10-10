@@ -7,6 +7,8 @@ venv/
 .env
 .env.*
 !.env.example
+.schwab_token.json
+*.schwab_token.json
 dist/
 build/
 *.egg-info/

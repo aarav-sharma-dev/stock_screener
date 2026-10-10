@@ -198,6 +198,14 @@ def build_index(
                             info[t]["trigger_price"] = float(m2.group(2))
                 info[t]["days_since_ath"] = int(float(r.get("days_since_ath") or -1))
                 info[t]["rsi14"] = fnum(r.get("rsi14"))
+            if name == "pead":
+                info[t]["ear_pct"] = fnum(r.get("ear_pct"))
+                info[t]["surprise_pct"] = fnum(r.get("surprise_pct"))
+                info[t]["reaction_date"] = (r.get("reaction_date") or "").strip()
+                info[t]["sessions_since_reaction"] = int(
+                    float(r.get("sessions_since_reaction") or 0)
+                )
+                info[t].setdefault("rsi14", fnum(r.get("rsi14")))
             if name in ("support", "catalyst") and fnum(r.get("rsi14")) is not None:
                 info[t].setdefault("rsi14", fnum(r.get("rsi14")))
             if name in ("support", "fundamentals", "catalyst"):
@@ -273,7 +281,8 @@ def classify_signal(
     sells = int(pol_sells or 0)
     pol_sell_lean = "politicians" in tags_l and sells > buys
     long_modes = any(
-        m in tags_l for m in ("athdip", "support", "catalyst", "fundamentals", "trump")
+        m in tags_l
+        for m in ("athdip", "pead", "support", "catalyst", "fundamentals", "trump")
     )
     if kind_l == "conflict" or (pol_sell_lean and long_modes):
         return "MIXED"
@@ -305,6 +314,7 @@ def pick_focus(
     cat = sets.get("catalyst", set())
     trm = sets.get("trump", set())
     fnd = sets.get("fundamentals", set())
+    ped = sets.get("pead", set())
 
     picks: list[dict[str, Any]] = []
     seen: set[str] = set()
@@ -312,6 +322,7 @@ def pick_focus(
     def tags_for(t: str) -> list[str]:
         order = [
             "athdip",
+            "pead",
             "support",
             "catalyst",
             "fundamentals",
@@ -343,6 +354,7 @@ def pick_focus(
             "tags": tags,
             "price": i.get("price"),
             "athdip": i.get("athdip"),
+            "pead": i.get("pead"),
             "support": i.get("support"),
             "catalyst": i.get("catalyst"),
             "fund": i.get("fundamentals"),
@@ -381,6 +393,29 @@ def pick_focus(
         elif len(tags_for(t)) >= 3:
             kind = "intersection"
             why = f"Athdip + multi-mode overlap · {keep_why}"
+        picks.append(row(t, kind, why))
+        seen.add(t)
+
+    # PEAD (top 3 by composite): fresh positive surprise + positive reaction
+    for t in sorted(ped, key=lambda x: -(info[x].get("pead") or 0))[:3]:
+        if t in seen:
+            continue
+        i = info[t]
+        ear = i.get("ear_pct")
+        sur = i.get("surprise_pct")
+        why = (
+            f"PEAD · EAR {ear:+.1f}% vs SPY" if ear is not None else "PEAD"
+        )
+        if sur is not None:
+            why += f" · EPS surprise {sur:+.1f}%"
+        if i.get("reaction_date"):
+            why += f" · reaction {i['reaction_date']} ({i.get('sessions_since_reaction', 0)}d ago)"
+        kind = "pead"
+        if t in pol and (i.get("pol_sells") or 0) > (i.get("pol_buys") or 0):
+            kind = "conflict"
+            why = f"PEAD vs Congress sells ({i.get('pol_buys', 0)}/{i.get('pol_sells', 0)}) · " + why
+        elif len(tags_for(t)) >= 3:
+            kind = "intersection"
         picks.append(row(t, kind, why))
         seen.add(t)
 
@@ -446,6 +481,7 @@ def write_focus_csv(picks: list[dict[str, Any]], path: Path) -> None:
         "why",
         "tags",
         "athdip",
+        "pead",
         "support",
         "catalyst",
         "fund",
@@ -517,6 +553,7 @@ def render_canvas(
         or len(modes.get("trump") or []),
         "athdipPass": len(ath_rows),
         "athdipLowestRsi4h": lowest_rsi or 0.0,
+        "peadPass": len(modes.get("pead") or []),
         "spyYtd": next((b["ret"] for b in backtest if b.get("mode") == "SPY"), 0.0),
     }
 
@@ -529,6 +566,7 @@ def render_canvas(
             + f'price:{js_num(p.get("price"), 2)},'
             + f'tags:{js_str(p.get("tags"))},why:{js_str(p.get("why"))},'
             + f'athdip:{js_num(p.get("athdip"), 1)},'
+            + f'pead:{js_num(p.get("pead"), 1)},'
             + f'support:{js_num(p.get("support"), 1)},'
             + f'catalyst:{js_num(p.get("catalyst"), 1)},'
             + f'fund:{js_num(p.get("fund"), 1)},'
@@ -695,6 +733,7 @@ const RUN = {{
   trumpTickers: {run["trumpTickers"]},
   athdipPass: {run["athdipPass"]},
   athdipLowestRsi4h: {js_num(run["athdipLowestRsi4h"], 1)},
+  peadPass: {run["peadPass"]},
   spyYtd: {js_num(run["spyYtd"], 2)},
   note: "Generated from output/screen_*.csv · watchlist only, not advice",
 }};
@@ -745,7 +784,7 @@ function biasTone(bias: string): "success" | "warning" | "danger" | "info" | "ne
 
 function focusTone(kind: string): "success" | "warning" | "danger" | "info" | "neutral" {{
   if (kind === "conflict") return "danger";
-  if (kind === "intersection" || kind === "confirm" || kind === "athdip") return "success";
+  if (kind === "intersection" || kind === "confirm" || kind === "athdip" || kind === "pead") return "success";
   if (kind === "single") return "info";
   return "neutral";
 }}
@@ -965,6 +1004,11 @@ export default function ScreenDashboard() {{
           "Athdip",
           "Count of Athdip hard passes: recent multi-year all-time-high setup with four-hour relative strength index near oversold.",
           <Stat value={{String(RUN.athdipPass)}} label="Athdip" tone="success" />,
+        )}}
+        {{withTip(
+          "PEAD",
+          "Count of post-earnings-announcement-drift passes: EPS surprise ≥ 5% and a ≥ 3% excess reaction vs SPY within the last 15 sessions.",
+          <Stat value={{String(RUN.peadPass)}} label="PEAD" tone="success" />,
         )}}
       </Grid>
 
@@ -1440,6 +1484,7 @@ def main() -> None:
         "politicians": read_df(OUTPUT / "screen_politicians.csv"),
         "trump": read_df(OUTPUT / "screen_trump.csv"),
         "athdip": read_df(OUTPUT / "screen_athdip.csv"),
+        "pead": read_df(OUTPUT / "screen_pead.csv"),
     }
     if not any(modes.values()):
         raise SystemExit("No output/screen_*.csv found. Run stock-screener --mode all first.")
@@ -1490,7 +1535,7 @@ def main() -> None:
             if p.get(k) is None and y.get(k) is not None:
                 p[k] = y[k]
         # normalize rounded fields
-        for k, d in (("price", 2), ("athdip", 1), ("support", 1), ("catalyst", 1), ("fund", 1), ("pol", 1), ("trump", 1), ("rsi4h", 1), ("pe", 1), ("peg", 2), ("fcfy", 1), ("roe", 1)):
+        for k, d in (("price", 2), ("athdip", 1), ("pead", 1), ("support", 1), ("catalyst", 1), ("fund", 1), ("pol", 1), ("trump", 1), ("rsi4h", 1), ("pe", 1), ("peg", 2), ("fcfy", 1), ("roe", 1)):
             p[k] = round_or_none(p.get(k), d)
 
     focus_path = OUTPUT / "today_focus.csv"

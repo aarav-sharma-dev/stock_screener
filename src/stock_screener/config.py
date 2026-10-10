@@ -58,6 +58,23 @@ class ScreenerConfig:
     athdip_require_multi_year_break: bool = True  # require break-at-ATH setup
     athdip_require_near_ath_pct: bool = False
     athdip_drop_death_cross: bool = False
+    # Optional entry-bar confirmation: Internal Bar Strength = (close-low)/(high-low)
+    # of the daily trigger bar must be ≤ this (Alvarez: ≤0.25 keeps ~63% of RSI(2)
+    # trades with ~+21% avg P/L). None = off (production default).
+    athdip_ibs_max: float | None = None
+    # Optional regime gates (pre-chosen from literature, not tuned here):
+    #   athdip_gate_vix_min      — prior-session VIX close ≥ this (e.g. 20.0)
+    #   athdip_gate_spx_mom_days — SPY return over N sessions must be > 0 (e.g. 126)
+    athdip_gate_vix_min: float | None = None
+    athdip_gate_spx_mom_days: int | None = None
+    # PEAD mode (post-earnings-announcement drift, long side only)
+    enable_pead: bool = True
+    pead_max_sessions_since_report: int = 15  # entry window after reaction day R
+    pead_min_surprise_pct: float = 5.0  # Yahoo EPS surprise (SUE proxy)
+    pead_min_ear_pct: float = 3.0  # close[R-1]→close[R+1] minus SPY
+    pead_earnings_limit: int = 8  # yfinance earnings_dates rows per ticker
+    pead_prefilter_abs_move_pct: float = 2.5  # skip names with no |1d move| ≥ this recently
+    pead_require_above_entry: bool = False  # last close ≥ close[R+1] (drift intact)
     # Support-mode hard filters (neutral baseline; VIX regime adjusts)
     min_range_pct: float = 0.05
     max_proximity_for_long: float = 0.45

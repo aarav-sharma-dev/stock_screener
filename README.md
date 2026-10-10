@@ -30,6 +30,28 @@ Reddit often blocks anonymous `.json` calls (403). Create a free Reddit “scrip
 
 Robinhood / SoFi / Public are not used (no free scan APIs). Webull OpenAPI is paid/approval-based and not wired in.
 
+### Charles Schwab Trader API (optional)
+
+Live quotes / history / L1 streamer via [Individual Trader API](https://developer.schwab.com/products/trader-api--individual) + `schwab-py`. Does **not** replace Yahoo for news/fundamentals.
+
+```bash
+pip install -e .
+# Optional: WebSocket streamer needs Python ≥3.10 + schwab-py
+# pip install -e '.[schwab]'
+# Set SCHWAB_API_KEY, SCHWAB_APP_SECRET, SCHWAB_CALLBACK_URL in .env
+python scripts/schwab_auth.py          # browser OAuth → .schwab_token.json
+python scripts/schwab_auth.py --manual # paste code if callback fails
+python scripts/schwab_quotes.py AAPL MSFT
+python scripts/schwab_quotes.py --history-4h NVDA --days 10
+python scripts/schwab_stream_watchlist.py --from-focus --seconds 90
+
+# Live athdip: Schwab RTH 4h RSI cross ≤31 (+ Yahoo compare)
+python3 scripts/schwab_athdip_watch.py --once
+python3 scripts/schwab_athdip_watch.py --interval 300   # every 5m
+```
+
+Athdip on thinkorswim (Stock Hacker + study alerts): see `docs/thinkscript/ATHDIP_STOCKHACKER.md`.
+
 ## Setup
 
 ```bash
@@ -67,6 +89,9 @@ stock-screener --mode trump --no-trump-x --top 25
 
 # Near ATH + 4h RSI ~30 (dip in uptrend)
 stock-screener --mode athdip --universe sp500 --limit 80 --top 25
+
+# Post-earnings drift watchlist (EPS surprise ≥5% + reaction ≥3% vs SPY, ≤15 sessions old)
+stock-screener --mode pead --universe sp500 --no-news
 ```
 
 Politician freshness weight: `freshness = max(0, 1 - filed_after_days/45)` then  
@@ -75,6 +100,8 @@ Politician freshness weight: `freshness = max(0, 1 - filed_after_days/45)` then
 Trump tracker weights Truth Social > White House > X > news, with ~36h freshness half-life, then maps themes (tariffs, China, energy, defense, banks, etc.) to liquid tickers/ETFs.
 
 Athdip: **setup** = multi-year ATH break (21d fresh high at ATH time); **trigger** = **min 4h RSI ≤ `--athdip-rsi-max`** over `--athdip-rsi-lookback` days (defaults **31** / **5**) while ATH is within `--athdip-max-ath-age` sessions (default **63**). Universe `--limit` keeps liquid mega-caps (NVDA, AMD, …) before alphabetical fill.
+
+PEAD: reaction day **R** = first session after the print (≥16:00 ET → next day); **EAR** = close[R−1]→close[R+1] minus SPY; entry reference = close[R+1]. Runs inside `--mode all` (skip with `--no-pead`). Backtest (`scripts/backtest_pead.py`, S&P 500 2024→) found **no significant drift in large caps** — treat it as a watchlist, not an edge.
 
 Results print to the terminal and write `output/screen.csv`.
 
@@ -86,7 +113,44 @@ After a screen run, rebuild the Cursor canvas + `output/today_focus.csv`:
 python3 scripts/build_screen_dashboard.py
 ```
 
-That also diffs vs `output/signal_snapshot.json` and alerts on **new** symbols (stdout + macOS notification; Slack if `SCREENER_SLACK_WEBHOOK` is set). Alerts include **BUY/SELL/MIXED** lean plus **daily RSI** (and **4h RSI** when athdip). First run only saves a baseline. For near-real-time coverage, re-run the screen + dashboard on an interval during market hours (e.g. every 30 minutes).
+That also diffs vs `output/signal_snapshot.json` and alerts on **new** symbols (stdout + macOS notification; Slack if `SCREENER_SLACK_WEBHOOK` is set). Alerts include **BUY/SELL/MIXED** lean plus **daily RSI** (and **4h RSI** when athdip). First run only saves a baseline.
+
+### Cron (VM) — Schwab every 30m + Yahoo open/close
+
+Keep your existing crontab; only the **script** switches mid-day to Schwab:
+
+```cron
+CRON_TZ=America/Chicago
+*/30 6-18 * * 1-5 /home/asharma/bin/stock-screener-alert.sh
+0 19 * * 1-5 /home/asharma/bin/stock-screener-alert.sh
+```
+
+| When (CT) | Mode |
+|-----------|------|
+| **06:00** | Full Yahoo screen + dashboard (refresh `screen_athdip.csv` / focus) |
+| **06:30–18:30** `*/30` | **Schwab** athdip RSI watch only (`--source screen --no-compare`) |
+| **19:00** | Full Yahoo screen + dashboard (EOD new-symbol Slack) |
+
+Deploy after `git pull` on the VM:
+
+```bash
+cp -a scripts/stock-screener-alert.sh ~/bin/stock-screener-alert.sh
+chmod +x ~/bin/stock-screener-alert.sh
+# optional: export SCREENER_ROOT=$HOME/workspace/stock-screener
+# smoke: SCREENER_FORCE_SCHWAB=1 ~/bin/stock-screener-alert.sh
+#        SCREENER_FORCE_FULL=1   ~/bin/stock-screener-alert.sh
+```
+
+Requires working Schwab OAuth token on the VM (`.schwab_token.json` + keys in `.env`).
+
+Per-mode Slack filter (example: only athdip + support):
+
+```bash
+python3 scripts/alert_new_signals.py --modes athdip,support
+# Schwab last prices are included automatically when `.schwab_token.json` exists
+# Disable: --no-schwab-quotes   or   SCREENER_SLACK_SCHWAB_QUOTES=0
+# or: export SCREENER_SLACK_MODES=athdip,support
+```
 
 Project skill (for agents / teammates): `.cursor/skills/daily-screen/SKILL.md` — covers the full reproduce path (screen → focus → canvas).
 

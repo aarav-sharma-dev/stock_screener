@@ -20,6 +20,14 @@ dependencies = [
   "pdfplumber>=0.11.0",
 ]
 
+[project.optional-dependencies]
+schwab = [
+  # Optional WebSocket streamer only (needs Python ≥3.10). REST OAuth/quotes
+  # work without this extra via requests.
+  "schwab-py>=1.4.0; python_version >= '3.10'",
+  "websockets>=12.0; python_version >= '3.10'",
+]
+
 [project.scripts]
 stock-screener = "stock_screener.cli:main"
 
