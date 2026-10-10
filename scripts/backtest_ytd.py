@@ -211,6 +211,9 @@ class BacktestResult:
     win_rate_pct: float
     max_drawdown_pct: float
     signal_rows: list[dict] | None = None
+    cost_per_side_pct: float = 0.0
+    total_cost_pct: float = 0.0  # cumulative % of equity paid in costs
+    gated_days: int = 0  # athdip days skipped by regime gates
 
 
 def market_at(vix: float | None, cfg: ScreenerConfig) -> MarketSentiment:
@@ -416,6 +419,13 @@ def pick_tickers(
                 continue
             if rsi_4h > cfg.athdip_rsi_4h_max:
                 continue
+            ibs: float | None = None
+            if len(high) and len(low) and len(close):
+                rng = float(high.iloc[-1]) - float(low.iloc[-1])
+                if rng > 0:
+                    ibs = (float(close.iloc[-1]) - float(low.iloc[-1])) / rng
+            if cfg.athdip_ibs_max is not None and (ibs is None or ibs > cfg.athdip_ibs_max):
+                continue
             score = athdip_composite(
                 tech,
                 pct_from_ath=pct_ath,
@@ -434,6 +444,7 @@ def pick_tickers(
                         "pct_from_ath": round(pct_ath, 2),
                         "days_since_ath": days_since,
                         "rsi_4h": round(rsi_4h, 2),
+                        "ibs": round(ibs, 3) if ibs is not None else None,
                         "score": round(score, 2),
                     },
                 )
@@ -469,6 +480,61 @@ def pick_tickers(
     return [t for t, _ in top], None
 
 
+def turnover_cost(
+    prev: list[str], new: list[str], cost_per_side_pct: float
+) -> float:
+    """Fraction of equity paid to move an equal-weight book from ``prev`` to ``new``.
+
+    Entries pay ``cost`` on their new weight (1/len(new)); exits pay ``cost`` on
+    their old weight (1/len(prev)). Names held across both legs pay nothing
+    (equal-weight drift ignored). ``cost_per_side_pct`` is in percent (0.1 = 10 bps).
+    """
+    if cost_per_side_pct <= 0:
+        return 0.0
+    c = cost_per_side_pct / 100.0
+    prev_set, new_set = set(prev), set(new)
+    entries = len(new_set - prev_set)
+    exits = len(prev_set - new_set)
+    cost = 0.0
+    if new_set and entries:
+        cost += c * entries / len(new_set)
+    if prev_set and exits:
+        cost += c * exits / len(prev_set)
+    return cost
+
+
+def athdip_regime_ok(
+    prices: pd.DataFrame,
+    vix: pd.Series,
+    as_of: pd.Timestamp,
+    cfg: ScreenerConfig,
+) -> tuple[bool, str]:
+    """Pre-chosen regime gates for athdip (both off by default).
+
+    * ``athdip_gate_vix_min``: prior-session VIX close must be ≥ this
+      (quanterlab 2026 used 20, fixed from 1990–2005 mean; one-day lag because
+      VIX settles after the stock close).
+    * ``athdip_gate_spx_mom_days``: SPY return over this many sessions must be > 0
+      (Alvarez uses 126d).
+    """
+    if cfg.athdip_gate_vix_min is not None:
+        v = vix.loc[:as_of].dropna()
+        if len(v) < 2:
+            return False, "vix n/a"
+        prior = float(v.iloc[-2])
+        if prior < cfg.athdip_gate_vix_min:
+            return False, f"VIX prior {prior:.1f} < {cfg.athdip_gate_vix_min:.0f}"
+    if cfg.athdip_gate_spx_mom_days:
+        spy = _col(prices, "Close", "SPY").loc[:as_of].dropna()
+        n = int(cfg.athdip_gate_spx_mom_days)
+        if len(spy) <= n:
+            return False, "spx n/a"
+        mom = float(spy.iloc[-1] / spy.iloc[-1 - n] - 1.0)
+        if mom <= 0:
+            return False, f"SPX {n}d {mom*100:+.1f}% ≤ 0"
+    return True, "ok"
+
+
 def run_mode_backtest(
     prices: pd.DataFrame,
     vix: pd.Series,
@@ -480,6 +546,7 @@ def run_mode_backtest(
     fund_map: dict[str, FundamentalsSnapshot] | None = None,
     cycle: MarketCycle | None = None,
     bars_4h: pd.DataFrame | None = None,
+    cost_per_side_pct: float = 0.0,
 ) -> BacktestResult:
     spy = _col(prices, "Close", "SPY").dropna()
     trading_days = spy.index[spy.index >= year_start]
@@ -494,6 +561,9 @@ def run_mode_backtest(
     period_returns: list[float] = []
     holding_counts: list[int] = []
     signal_rows: list[dict] = []
+    prev_holdings: list[str] = []
+    total_cost = 0.0
+    gated_days = 0
 
     # Athdip: daily rebalance on actual 4h RSI trigger days; others stay weekly
     if mode == "athdip":
@@ -506,22 +576,36 @@ def run_mode_backtest(
     for i, reb_date in enumerate(rebalance_dates):
         vix_val = float(vix.loc[:reb_date].iloc[-1]) if not vix.loc[:reb_date].empty else None
         market = market_at(vix_val, cfg)
-        picked = pick_tickers(
-            prices,
-            reb_date,
-            universe,
-            mode,
-            cfg,
-            market,
-            effective_top,
-            fund_map=fund_map,
-            cycle=cycle if mode == "value" else None,
-            bars_4h=bars_4h if mode == "athdip" else None,
-        )
-        holdings, details = picked
+        gate_ok = True
+        if mode == "athdip":
+            gate_ok, _why = athdip_regime_ok(prices, vix, reb_date, cfg)
+            if not gate_ok:
+                gated_days += 1
+        if gate_ok:
+            picked = pick_tickers(
+                prices,
+                reb_date,
+                universe,
+                mode,
+                cfg,
+                market,
+                effective_top,
+                fund_map=fund_map,
+                cycle=cycle if mode == "value" else None,
+                bars_4h=bars_4h if mode == "athdip" else None,
+            )
+            holdings, details = picked
+        else:
+            holdings, details = [], None
         if details:
             signal_rows.extend(details)
         holding_counts.append(len(holdings))
+        # Pay to rebalance from the previous book into this one
+        cost = turnover_cost(prev_holdings, holdings, cost_per_side_pct)
+        if cost:
+            equity *= 1.0 - cost
+            total_cost += cost
+        prev_holdings = list(holdings)
         if i + 1 >= len(rebalance_dates):
             break
         next_date = rebalance_dates[i + 1]
@@ -539,6 +623,11 @@ def run_mode_backtest(
         period_returns.append(port_ret)
         equity *= 1.0 + port_ret
         curve.append((next_date, equity))
+    # Close the final book
+    final_cost = turnover_cost(prev_holdings, [], cost_per_side_pct)
+    if final_cost:
+        equity *= 1.0 - final_cost
+        total_cost += final_cost
 
     curve_s = pd.Series({d: v for d, v in curve}).sort_index()
     spy_ytd = float(spy.loc[year_start:].iloc[-1] / spy.loc[year_start:].iloc[0] - 1.0) * 100.0
@@ -561,6 +650,9 @@ def run_mode_backtest(
         win_rate_pct=round(win_rate, 1),
         max_drawdown_pct=round(dd, 2),
         signal_rows=signal_rows or None,
+        cost_per_side_pct=cost_per_side_pct,
+        total_cost_pct=round(total_cost * 100.0, 2),
+        gated_days=gated_days,
     )
 
 def print_sketch(cycle: MarketCycle) -> None:
@@ -626,6 +718,12 @@ def main() -> None:
         "--modes",
         default="support,catalyst,value,trump,athdip",
         help="Comma-separated: support,catalyst,value,trump,athdip",
+    )
+    parser.add_argument(
+        "--cost",
+        type=float,
+        default=0.0,
+        help="Transaction cost per side in percent (0.1 = 10 bps each way); default 0",
     )
     args = parser.parse_args()
 
@@ -732,6 +830,7 @@ def main() -> None:
             fund_map=fund_map if mode == "value" else None,
             cycle=cycle if mode == "value" else None,
             bars_4h=bars_4h if mode == "athdip" else None,
+            cost_per_side_pct=args.cost,
         )
         results.append(res)
         if mode == "athdip" and res.signal_rows:
@@ -765,15 +864,16 @@ def main() -> None:
     win_hdr = "Win%" if any(m == "athdip" for m in modes) else "WinWk%"
     header = (
         f"{'Mode':10} {'Return%':>8} {'SPY%':>8} {'Excess':>8} "
-        f"{win_hdr:>8} {'MaxDD%':>8} {'Avg#':>6}"
+        f"{win_hdr:>8} {'MaxDD%':>8} {'Avg#':>6} {'Cost%':>7}"
     )
-    print("\n" + header)
+    print(f"\nCost per side: {args.cost:.3f}%")
+    print(header)
     print("-" * len(header))
     for r in results:
         print(
             f"{r.mode:10} {r.ytd_return_pct:+8.2f} {r.spy_return_pct:+8.2f} "
             f"{r.excess_pct:+8.2f} {r.win_rate_pct:8.1f} {r.max_drawdown_pct:8.2f} "
-            f"{r.avg_holdings:6.1f}"
+            f"{r.avg_holdings:6.1f} {r.total_cost_pct:7.2f}"
         )
 
     if results:

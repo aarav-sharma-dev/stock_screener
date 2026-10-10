@@ -13,6 +13,12 @@ from stock_screener.data.fundamentals import (
 )
 from stock_screener.data.grok_x import GrokXAssessment, enrich_top_with_grok
 from stock_screener.data.news import NewsAssessment, fetch_news_assessment
+from stock_screener.data.pead import (
+    earnings_reaction,
+    fetch_earnings_events_map,
+    pead_composite,
+    reaction_session,
+)
 from stock_screener.data.x_quote_news import (
     blend_yahoo_and_x_quote,
     fetch_x_quote_news_assessment,
@@ -50,6 +56,7 @@ from stock_screener.scoring import (
     build_athdip_row,
     build_catalyst_row,
     build_support_row,
+    sma_regime_label,
 )
 logger = logging.getLogger(__name__)
 
@@ -185,16 +192,18 @@ def run_screener(
     pd.DataFrame,
     pd.DataFrame,
     pd.DataFrame,
+    pd.DataFrame,
     MarketSentiment,
 ]:
     """
-    Returns (support, catalyst, fundamentals, politicians, trump, athdip, market).
+    Returns (support, catalyst, fundamentals, politicians, trump, athdip, pead, market).
     """
     cfg = config or ScreenerConfig()
     mode = (cfg.mode or "all").lower()
     want_support = mode in {"support", "both", "all"}
     want_catalyst = mode in {"catalyst", "both", "all"}
     want_athdip = mode in {"athdip", "all"}
+    want_pead = mode == "pead" or (mode == "all" and cfg.enable_pead)
     want_fundamentals = mode in {"fundamentals", "all"} or (
         cfg.enable_fundamentals and mode in {"support", "catalyst", "both", "all"}
     )
@@ -207,7 +216,7 @@ def run_screener(
 
     # Tracker-only modes don't need a price universe
     if mode in {"trump", "politicians"} and not (
-        want_support or want_catalyst or want_athdip
+        want_support or want_catalyst or want_athdip or want_pead
     ):
         universe = tickers or []
     else:
@@ -233,15 +242,19 @@ def run_screener(
     politicians_df = empty
     trump_df = empty
     athdip_df = empty
+    pead_df = empty
     liquid: list[str] = []
     tech_rows: list[tuple[str, TechnicalFeatures]] = []
     high_by_ticker: dict[str, pd.Series] = {}
+    low_by_ticker: dict[str, pd.Series] = {}
     close_by_ticker: dict[str, pd.Series] = {}
+    open_by_ticker: dict[str, pd.Series] = {}
 
     need_prices = (
         want_support
         or want_catalyst
         or want_athdip
+        or want_pead
         or mode in {"fundamentals", "all"}
     )
     hist_days = cfg.history_days
@@ -253,15 +266,17 @@ def run_screener(
             universe,
             history_days=hist_days,
             chunk_size=cfg.price_chunk_size,
+            source=cfg.price_source,
         )
         if prices.empty and mode not in {"politicians", "trump"}:
-            return empty, empty, empty, empty, empty, empty, market
+            return empty, empty, empty, empty, empty, empty, empty, market
 
         for ticker in universe:
             close = series_for(prices, "Close", ticker)
             high = series_for(prices, "High", ticker)
             low = series_for(prices, "Low", ticker)
             vol = series_for(prices, "Volume", ticker)
+            open_by_ticker[ticker] = series_for(prices, "Open", ticker)
             tech = compute_technicals(
                 close,
                 high,
@@ -276,6 +291,7 @@ def run_screener(
                 continue
             tech_rows.append((ticker, tech))
             high_by_ticker[ticker] = high
+            low_by_ticker[ticker] = low
             close_by_ticker[ticker] = close
 
         logger.info(
@@ -486,6 +502,16 @@ def run_screener(
                 close_by_ticker=close_by_ticker,
                 market=market,
                 cfg=cfg,
+                low_by_ticker=low_by_ticker,
+            )
+
+        # --- PEAD: fresh positive EPS surprise + positive EAR, drift window ---
+        if want_pead:
+            pead_df = _run_pead(
+                tech_rows=tech_rows,
+                close_by_ticker=close_by_ticker,
+                open_by_ticker=open_by_ticker,
+                cfg=cfg,
             )
 
     pol_map = {}
@@ -532,8 +558,136 @@ def run_screener(
         politicians_df,
         trump_df,
         athdip_df,
+        pead_df,
         market,
     )
+
+
+def _run_pead(
+    *,
+    tech_rows: list[tuple[str, TechnicalFeatures]],
+    close_by_ticker: dict[str, pd.Series],
+    open_by_ticker: dict[str, pd.Series],
+    cfg: ScreenerConfig,
+) -> pd.DataFrame:
+    """Long-only PEAD: EPS surprise ≥ min, EAR ≥ min, within N sessions of the print.
+
+    Cheap prefilter first (a real reaction shows up as a ≥ X% daily move in the
+    last N+2 sessions), then one yfinance earnings_dates call per survivor.
+    """
+    max_s = cfg.pead_max_sessions_since_report
+    liquid = [
+        (t, tech)
+        for t, tech in tech_rows
+        if tech.price >= cfg.min_price and tech.avg_dollar_volume >= cfg.min_avg_dollar_volume
+    ]
+    pre: list[tuple[str, TechnicalFeatures]] = []
+    for t, tech in liquid:
+        c = close_by_ticker.get(t, pd.Series(dtype=float)).dropna()
+        if len(c) < max_s + 3:
+            continue
+        rets = c.pct_change().tail(max_s + 2).abs() * 100.0
+        if float(rets.max()) >= cfg.pead_prefilter_abs_move_pct:
+            pre.append((t, tech))
+    logger.info(
+        "PEAD prefilter: %d / %d liquid names had a ≥%.1f%% daily move in last %d sessions",
+        len(pre),
+        len(liquid),
+        cfg.pead_prefilter_abs_move_pct,
+        max_s + 2,
+    )
+    if not pre:
+        return pd.DataFrame()
+
+    spy_df = download_prices(
+        ["SPY"],
+        history_days=max(cfg.history_days, 120),
+        chunk_size=1,
+        source=cfg.price_source,
+    )
+    spy_close = series_for(spy_df, "Close", "SPY").dropna()
+    if spy_close.empty:
+        logger.warning("PEAD: SPY download failed; cannot compute EAR")
+        return pd.DataFrame()
+
+    events_map = fetch_earnings_events_map(
+        [t for t, _ in pre], limit=cfg.pead_earnings_limit
+    )
+    rows: list[dict] = []
+    for t, tech in pre:
+        events = events_map.get(t) or []
+        close = close_by_ticker.get(t, pd.Series(dtype=float)).dropna()
+        if not events or close.empty:
+            continue
+        sessions = pd.DatetimeIndex(pd.to_datetime(close.index))
+        latest = events[0]
+        r_date = reaction_session(latest, sessions)
+        if r_date is None:
+            continue
+        stats = earnings_reaction(close, spy_close, r_date, open_by_ticker.get(t))
+        if stats is None:
+            continue
+        since = stats.sessions_since_reaction
+        if since < 1 or since > max_s:
+            continue
+        sur = latest.surprise_pct
+        ok_sur = sur is not None and sur >= cfg.pead_min_surprise_pct
+        ok_ear = stats.ear_pct >= cfg.pead_min_ear_pct
+        px = float(close.iloc[-1])
+        since_entry = (px / stats.entry_price - 1.0) * 100.0 if stats.entry_price else 0.0
+        ok_drift = (not cfg.pead_require_above_entry) or since_entry >= 0.0
+        passed = ok_sur and ok_ear and ok_drift
+        why = (
+            f"EPS {latest.eps_actual:.2f} vs {latest.eps_estimate if latest.eps_estimate is not None else float('nan'):.2f} "
+            f"({sur:+.1f}% surprise) · EAR {stats.ear_pct:+.1f}% · "
+            f"{since}d since reaction · {since_entry:+.1f}% since entry close"
+            if sur is not None
+            else f"EAR {stats.ear_pct:+.1f}% · surprise n/a · {since}d since reaction"
+        )
+        rows.append(
+            {
+                "mode": "pead",
+                "ticker": t,
+                "price": round(px, 2),
+                "report_ts": latest.event_ts.strftime("%Y-%m-%d %H:%M"),
+                "reaction_date": stats.reaction_date.strftime("%Y-%m-%d"),
+                "entry_date": stats.entry_date.strftime("%Y-%m-%d"),
+                "entry_price": round(stats.entry_price, 2),
+                "sessions_since_reaction": since,
+                "eps_estimate": latest.eps_estimate,
+                "eps_actual": latest.eps_actual,
+                "surprise_pct": round(sur, 2) if sur is not None else None,
+                "ear_pct": round(stats.ear_pct, 2),
+                "raw_reaction_pct": round(stats.raw_ret_pct, 2),
+                "gap_pct": round(stats.gap_pct, 2) if stats.gap_pct is not None else None,
+                "since_entry_pct": round(since_entry, 2),
+                "rsi14": round(tech.rsi14, 1) if tech.rsi14 is not None else None,
+                "sma_regime": sma_regime_label(tech),
+                "pct_from_52w_high": round(tech.pct_from_52w_high, 2),
+                "composite": pead_composite(
+                    ear_pct=stats.ear_pct,
+                    surprise_pct=sur,
+                    sessions_since_reaction=since,
+                    max_sessions=max_s,
+                ),
+                "pass_filters": passed,
+                "why": why,
+            }
+        )
+    logger.info(
+        "PEAD: %d names with a print in the last %d sessions; %d passed "
+        "(surprise ≥ %.0f%%, EAR ≥ %.0f%%)",
+        len(rows),
+        max_s,
+        sum(1 for r in rows if r["pass_filters"]),
+        cfg.pead_min_surprise_pct,
+        cfg.pead_min_ear_pct,
+    )
+    if not rows:
+        return pd.DataFrame()
+    df = pd.DataFrame(rows)
+    passed_df = df[df["pass_filters"]].copy()
+    return passed_df.sort_values("composite", ascending=False).reset_index(drop=True)
 
 
 def _run_athdip(
@@ -543,8 +697,10 @@ def _run_athdip(
     close_by_ticker: dict[str, pd.Series],
     market: MarketSentiment,
     cfg: ScreenerConfig,
+    low_by_ticker: dict[str, pd.Series] | None = None,
 ) -> pd.DataFrame:
     """Watch recent multi-year ATH setups; trigger on 4h RSI ≤ max."""
+    low_by_ticker = low_by_ticker or {}
     # ticker, tech, ath, pct_ath, prior_high, days_since_ath, setup_ok
     candidates: list[
         tuple[str, TechnicalFeatures, float, float, float | None, int | None, bool]
@@ -608,6 +764,7 @@ def _run_athdip(
         interval="4h",
         period=cfg.athdip_intraday_period,
         chunk_size=min(40, cfg.price_chunk_size),
+        source=cfg.price_source,
     )
     rows: list[ScreenRow] = []
     for ticker, tech, ath, pct_ath, prior_high, days_since, setup_ok in candidates:
@@ -648,6 +805,17 @@ def _run_athdip(
                 if sess == trig_day:
                     trigger_price = float(px)
                     break
+        # Optional IBS confirmation on the latest daily bar (off by default)
+        if cfg.athdip_ibs_max is not None:
+            hi_s = high_by_ticker.get(ticker, pd.Series(dtype=float)).dropna()
+            lo_s = low_by_ticker.get(ticker, pd.Series(dtype=float)).dropna()
+            cl_s = close_by_ticker.get(ticker, pd.Series(dtype=float)).dropna()
+            if hi_s.empty or lo_s.empty or cl_s.empty:
+                continue
+            rng = float(hi_s.iloc[-1]) - float(lo_s.iloc[-1])
+            ibs = (float(cl_s.iloc[-1]) - float(lo_s.iloc[-1])) / rng if rng > 0 else None
+            if ibs is None or ibs > cfg.athdip_ibs_max:
+                continue
         pct_ema: float | None = None
         if cfg.athdip_use_4h_ema200 and len(close_4h) >= 200:
             ema200 = close_4h.ewm(span=200, adjust=False).mean()
