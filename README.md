@@ -131,8 +131,8 @@ CRON_TZ=America/Chicago
 
 | When (CT) | Mode |
 |-----------|------|
-| **06:00** | Full screen + dashboard. Prices from **Schwab**, Yahoo only if a symbol is missing (`--price-source schwab`). Refreshes `screen_athdip.csv` / focus |
-| **06:30–18:30** `*/30` | **Schwab** athdip RSI watch only (`--source screen --no-compare`) |
+| **06:00** | Every mode on the full universe (S&P 500 plus the AI, chip, energy, nuclear, and ETF names). Prices and fundamentals come from **Schwab** only. Schwab has no headline feed, next earnings date, or EPS surprise, so those inputs stay neutral. A rejected Schwab login sends one Slack message per day. Writes `athdip_setups.csv` and `screen_athdip.csv` |
+| **06:30–18:30** `*/30` | Athdip again on the **full universe** (S&P 500 plus the extra AI, chip, energy, nuclear, and ETF names). Alerts only tickers that were not already in the snapshot |
 | **19:00** | Same full screen again (EOD new-symbol Slack) |
 
 Deploy after `git pull` on the VM:

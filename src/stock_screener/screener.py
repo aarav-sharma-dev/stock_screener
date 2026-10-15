@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from pathlib import Path
 
 import pandas as pd
 
@@ -42,7 +43,11 @@ from stock_screener.data.politicians import (
     score_politician_tickers,
 )
 from stock_screener.data.sentiment import MarketSentiment, assess_market_sentiment
-from stock_screener.data.universe import resolve_universe
+from stock_screener.data.universe import (
+    ATHDIP_THEME_EXTRAS,
+    _normalize_symbol,
+    resolve_universe,
+)
 from stock_screener.features import (
     TechnicalFeatures,
     all_time_high,
@@ -225,6 +230,13 @@ def run_screener(
             tickers=tickers,
             universe=cfg.universe,
         )
+        if want_athdip:
+            extras = [
+                _normalize_symbol(t)
+                for t in (*ATHDIP_THEME_EXTRAS, *cfg.athdip_extra_tickers)
+                if str(t).strip()
+            ]
+            universe = list(dict.fromkeys([*universe, *extras]))
     market = assess_market_sentiment(cfg)
     logger.info("Market sentiment: %s (%s)", market.label, market.reason)
     logger.info(
@@ -305,7 +317,11 @@ def run_screener(
         ]
 
         news_map: dict[str, NewsAssessment] = {}
-        if fetch_news and (want_support or want_catalyst):
+        if fetch_news and (want_support or want_catalyst) and cfg.price_source == "schwab":
+            logger.info(
+                "News skipped: Schwab market data has no headline feed"
+            )
+        elif fetch_news and (want_support or want_catalyst):
             logger.info("Fetching Yahoo news for %d liquid candidates", len(liquid))
 
             def _one_news(t: str) -> tuple[str, NewsAssessment]:
@@ -352,7 +368,15 @@ def run_screener(
                     )
 
         earnings_map: dict[str, EarningsAssessment] = {}
-        if cfg.enable_earnings and (want_support or want_catalyst):
+        if (
+            cfg.enable_earnings
+            and (want_support or want_catalyst)
+            and cfg.price_source == "schwab"
+        ):
+            logger.info(
+                "Earnings dates skipped: Schwab has the last print, not the next date"
+            )
+        elif cfg.enable_earnings and (want_support or want_catalyst):
             earnings_map = fetch_earnings_map(liquid)
 
         reddit_map: dict[str, RedditAssessment] = {}
@@ -487,7 +511,7 @@ def run_screener(
                 if not fund_tickers:
                     fund_tickers = liquid[: cfg.fundamentals_enrich_top]
 
-            fund_map = fetch_fundamentals_map(fund_tickers)
+            fund_map = fetch_fundamentals_map(fund_tickers, source=cfg.price_source)
             fundamentals_df = _fund_to_passed(fund_map)
             if want_support and not support_df.empty:
                 support_df = _enrich_with_fundamentals(support_df, fund_map)
@@ -506,7 +530,11 @@ def run_screener(
             )
 
         # --- PEAD: fresh positive EPS surprise + positive EAR, drift window ---
-        if want_pead:
+        if want_pead and cfg.price_source == "schwab":
+            logger.info(
+                "PEAD skipped: EPS surprise is not in Schwab market data"
+            )
+        elif want_pead:
             pead_df = _run_pead(
                 tech_rows=tech_rows,
                 close_by_ticker=close_by_ticker,
@@ -755,6 +783,8 @@ def _run_athdip(
         cfg.athdip_max_days_since_ath,
         cfg.athdip_fresh_high_days,
     )
+    if cfg.athdip_setups_path:
+        _write_athdip_setups(cfg.athdip_setups_path, candidates)
     if not candidates:
         return pd.DataFrame()
 
@@ -853,3 +883,23 @@ def _run_athdip(
         ),
     )
     return _rows_to_passed(rows)
+
+
+def _write_athdip_setups(path: str, candidates: list) -> None:
+    """Names with a fresh multi-year ATH, before the 4h RSI trigger."""
+    dest = Path(path)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    frame = pd.DataFrame(
+        [
+            {
+                "ticker": ticker,
+                "price": round(float(tech.price), 2),
+                "ath_high": round(float(ath), 2),
+                "pct_from_ath": round(float(pct_ath), 2),
+                "days_since_ath": "" if days_since is None else int(days_since),
+            }
+            for ticker, tech, ath, pct_ath, _prior, days_since, _ok in candidates
+        ]
+    )
+    frame.to_csv(dest, index=False)
+    logger.info("Wrote %d athdip setups → %s", len(frame), dest)
