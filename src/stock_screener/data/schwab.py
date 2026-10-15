@@ -94,6 +94,58 @@ def _load_token(path: Path) -> dict[str, Any] | None:
         return None
 
 
+def _alert_day() -> str:
+    try:
+        from zoneinfo import ZoneInfo
+
+        return datetime.now(ZoneInfo("America/Chicago")).strftime("%Y-%m-%d")
+    except Exception:  # noqa: BLE001
+        return datetime.now().strftime("%Y-%m-%d")
+
+
+def _login_alert_path() -> Path:
+    return ROOT / "output" / "schwab_login_alert.txt"
+
+
+def notify_schwab_login(reason: str) -> None:
+    """Slack once per Chicago day when the Schwab token cannot be refreshed."""
+    day = _alert_day()
+    marker = _login_alert_path()
+    try:
+        if marker.exists() and marker.read_text(encoding="utf-8").strip() == day:
+            logger.error("Schwab login still expired (%s)", reason[:200])
+            return
+    except OSError:
+        pass
+    text = (
+        "Schwab login expired or was rejected. Price and fundamental screens "
+        "will miss data until you re-run scripts/schwab_auth.py on the machine "
+        f"that holds the token.\n{reason[:300]}"
+    )
+    logger.error(text)
+    _load_dotenv()
+    webhook = (
+        os.getenv("SCREENER_SLACK_WEBHOOK") or os.getenv("SLACK_WEBHOOK_URL") or ""
+    ).strip()
+    if webhook:
+        try:
+            requests.post(webhook, json={"text": text}, timeout=15)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Schwab login Slack failed: %s", exc.__class__.__name__)
+    try:
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        marker.write_text(day, encoding="utf-8")
+    except OSError:
+        pass
+
+
+def clear_schwab_login_alert() -> None:
+    try:
+        _login_alert_path().unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
 def _save_token(path: Path, data: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(data, indent=2), encoding="utf-8")
@@ -134,12 +186,20 @@ def refresh_access_token(token: dict[str, Any], cfg: dict[str, str] | None = Non
     cfg = cfg or schwab_env()
     refresh = token.get("refresh_token")
     if not refresh:
+        notify_schwab_login("Token file has no refresh_token")
         raise SchwabNotConfiguredError("Token missing refresh_token; re-run schwab_auth.py")
-    new = _exchange_token(
-        api_key=cfg["api_key"],
-        app_secret=cfg["app_secret"],
-        data={"grant_type": "refresh_token", "refresh_token": refresh},
-    )
+    try:
+        new = _exchange_token(
+            api_key=cfg["api_key"],
+            app_secret=cfg["app_secret"],
+            data={"grant_type": "refresh_token", "refresh_token": refresh},
+        )
+    except SchwabAPIError as exc:
+        text = str(exc).lower()
+        if any(bit in text for bit in ("400", "401", "invalid_grant", "unsupported_token")):
+            notify_schwab_login(str(exc))
+        raise
+    clear_schwab_login_alert()
     # Preserve refresh_token if response omits it
     if "refresh_token" not in new and refresh:
         new["refresh_token"] = refresh
@@ -251,6 +311,7 @@ class SchwabClient:
         self.token_path = Path(cfg["token_path"])
         self.token = token or _load_token(self.token_path)
         if not self.token:
+            notify_schwab_login(f"No token at {self.token_path}")
             raise SchwabNotConfiguredError(
                 f"No token at {self.token_path}. Run: python scripts/schwab_auth.py"
             )
@@ -380,6 +441,42 @@ def get_client(*, interactive: bool = False) -> SchwabClient:
 def quotes(symbols: list[str], client: SchwabClient | None = None) -> dict[str, dict[str, Any]]:
     client = client or get_client()
     return client.get_quotes(symbols)
+
+
+def instrument_fundamental(
+    symbol: str, client: SchwabClient | None = None
+) -> dict[str, Any]:
+    """Fundamental block from ``/instruments?projection=fundamental``.
+
+    Schwab's market data API has this snapshot. It does not include a news
+    feed, the next earnings date, or an EPS surprise.
+    """
+    client = client or get_client()
+    sym = to_schwab_symbol(symbol)
+    payload = client.request(
+        "GET",
+        f"{MARKETDATA}/instruments",
+        params={"symbol": sym, "projection": "fundamental"},
+    )
+    if not isinstance(payload, dict):
+        return {}
+    instruments = payload.get("instruments")
+    if isinstance(instruments, list):
+        for row in instruments:
+            if not isinstance(row, dict):
+                continue
+            block = row.get("fundamental")
+            if isinstance(block, dict) and block:
+                return block
+        if instruments and isinstance(instruments[0], dict):
+            block = instruments[0].get("fundamental")
+            return block if isinstance(block, dict) else {}
+    for row in payload.values():
+        if isinstance(row, dict):
+            block = row.get("fundamental")
+            if isinstance(block, dict) and block:
+                return block
+    return {}
 
 
 def quote_last(symbol: str, client: SchwabClient | None = None) -> float | None:

@@ -7,14 +7,14 @@
 #   0 19 * * 1-5       /home/asharma/bin/stock-screener-alert.sh
 #
 # Behavior:
-#   06:00 CT (Mon–Fri)     → full screen + dashboard (Schwab prices, Yahoo backup)
-#   other */30 06–18 CT    → Schwab athdip RSI watch only (realtime crosses)
-#   19:00 CT               → full screen + dashboard again (EOD)
+#   06:00 CT (Mon–Fri)     → every mode on the full universe (S&P 500 + extras)
+#   other */30 06–18 CT    → athdip again on the full universe (S&P 500 + extras)
+#   19:00 CT               → same full screen again (EOD)
 #
 # Env (optional):
 #   SCREENER_ROOT          repo path (default: auto-detect)
 #   SCREENER_FORCE_FULL=1  force full screen this run
-#   SCREENER_FORCE_SCHWAB=1  force Schwab watch this run
+#   SCREENER_FORCE_SCHWAB=1  force a full-universe athdip scan this run
 
 set -euo pipefail
 
@@ -97,6 +97,12 @@ load_dotenv "$ROOT/.env"
 
 mkdir -p "$ROOT/output" "$ROOT/logs"
 LOG="$ROOT/logs/alert-$(date +%Y%m%d).log"
+# A full-universe scan can still be running when the next */30 slot fires.
+exec 9>"$ROOT/logs/alert.lock"
+if ! flock -n 9; then
+  log "Another scan is still running; skipping this slot"
+  exit 0
+fi
 
 HOUR="$(TZ=America/Chicago date +%-H 2>/dev/null || TZ=America/Chicago date +%H | sed 's/^0//')"
 MINUTE="$(TZ=America/Chicago date +%-M 2>/dev/null || TZ=America/Chicago date +%M | sed 's/^0//')"
@@ -113,26 +119,39 @@ run_full_screen() {
     SCREENER_BIN="$PY -m stock_screener"
   fi
 
-  $SCREENER_BIN --mode all --universe sp500 --limit 80 --top 25 \
+  # No --limit: support, catalyst, and athdip all see the S&P 500 plus extras.
+  $SCREENER_BIN --mode all --universe sp500 --top 25 \
     --allow-below-200 --no-reddit --no-grok --no-trump-x \
     --price-source schwab \
     --output output/screen.csv \
     2>&1 | tee -a "$LOG" || log "WARN: screener exited $?"
-
   $PY scripts/build_screen_dashboard.py 2>&1 | tee -a "$LOG" || log "WARN: dashboard exited $?"
   log "Full screen done"
 }
 
-run_schwab_watch() {
-  log "MODE=schwab athdip watch (no full Yahoo rescreen)"
-  if [[ ! -f "$ROOT/output/screen_athdip.csv" ]]; then
-    log "No screen_athdip.csv — seeding with one full screen"
-    run_full_screen
+run_wide_athdip() {
+  log "MODE=athdip full universe (S&P 500 + AI, chips, energy, nuclear, ETFs)"
+  if [[ -x "$ROOT/.venv/bin/stock-screener" ]]; then
+    SCREENER_BIN="$ROOT/.venv/bin/stock-screener"
+  elif command -v stock-screener >/dev/null 2>&1; then
+    SCREENER_BIN="stock-screener"
+  else
+    SCREENER_BIN="$PY -m stock_screener"
   fi
-  # Schwab-only RSI crosses; Yahoo compare off for cron
-  $PY scripts/schwab_athdip_watch.py --once --source screen --no-compare --no-desktop \
-    2>&1 | tee -a "$LOG" || log "WARN: schwab watch exited $?"
-  log "Schwab watch done"
+  # No --limit: the whole S&P 500, plus theme extras in the code.
+  $SCREENER_BIN --mode athdip --universe sp500 --top 50 \
+    --price-source schwab --no-news \
+    --output output/screen_athdip.csv \
+    2>&1 | tee -a "$LOG" || log "WARN: wide athdip exited $?"
+}
+
+run_schwab_watch() {
+  # Every half hour rescans the full athdip universe, then alerts only names
+  # that were not already in the snapshot. The setup watcher is not the scan.
+  run_wide_athdip
+  $PY scripts/alert_new_signals.py --no-desktop \
+    2>&1 | tee -a "$LOG" || log "WARN: new-signal alert exited $?"
+  log "Full-universe athdip done"
 }
 
 # Decide mode

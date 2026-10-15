@@ -24,12 +24,6 @@ def _normalize_download(raw: pd.DataFrame, tickers: list[str]) -> pd.DataFrame:
     return raw
 
 
-def _min_daily_bars(history_days: int) -> int:
-    """Sessions we expect before treating a Schwab series as complete."""
-    sessions = int(history_days * 252 / 365)
-    return max(40, int(sessions * 0.7))
-
-
 def _as_session_index(index: pd.Index) -> pd.DatetimeIndex:
     idx = pd.DatetimeIndex(pd.to_datetime(index))
     if idx.tz is not None:
@@ -132,7 +126,7 @@ def _download_prices_schwab(
     history_days: int,
     chunk_size: int,
 ) -> pd.DataFrame:
-    """Schwab daily bars, Yahoo only for symbols that came back short or empty."""
+    """Schwab daily bars. A short or empty series stays empty. No Yahoo fill."""
     from stock_screener.data.schwab import (
         SchwabAPIError,
         SchwabNotConfiguredError,
@@ -141,23 +135,14 @@ def _download_prices_schwab(
 
     end = pd.Timestamp.now(tz="UTC")
     start = end - pd.Timedelta(days=history_days + 40)
-    need = _min_daily_bars(history_days)
     try:
         client = get_client()
     except (SchwabAPIError, SchwabNotConfiguredError) as exc:
-        logger.warning("Schwab prices unavailable (%s); Yahoo for every symbol", exc)
-        return _yahoo_download(
-            tickers,
-            start=(end.tz_convert("UTC").date() - timedelta(days=history_days + 40)),
-            end=end.tz_convert("UTC").date() + timedelta(days=1),
-            chunk_size=chunk_size,
-        )
+        logger.warning("Schwab prices unavailable (%s)", exc)
+        return pd.DataFrame()
 
     got: dict[str, pd.DataFrame] = {}
-    logger.info(
-        "Downloading daily prices for %d tickers via Schwab (Yahoo backup)",
-        len(tickers),
-    )
+    logger.info("Downloading daily prices for %d tickers via Schwab", len(tickers))
 
     def _one(symbol: str) -> tuple[str, pd.DataFrame]:
         try:
@@ -172,43 +157,10 @@ def _download_prices_schwab(
             symbol, frame = fut.result()
             got[symbol] = frame
 
-    source_of: dict[str, str] = {}
-    backup = [t for t in tickers if len(got.get(t, pd.DataFrame())) < need]
-    for t in tickers:
-        if t not in backup and not got.get(t, pd.DataFrame()).empty:
-            source_of[t] = "schwab"
-    if backup:
-        logger.info(
-            "Yahoo backup for %d / %d symbols (Schwab < %d sessions): %s",
-            len(backup),
-            len(tickers),
-            need,
-            ",".join(backup[:12]) + ("…" if len(backup) > 12 else ""),
-        )
-        yahoo = _yahoo_download(
-            backup,
-            start=start.date(),
-            end=(end + pd.Timedelta(days=1)).date(),
-            chunk_size=chunk_size,
-        )
-        for t in backup:
-            yf_frame = _extract_ticker_frame(yahoo, t)
-            sch = got.get(t, pd.DataFrame())
-            if not yf_frame.empty and (sch.empty or len(yf_frame) > len(sch) + 20):
-                got[t] = yf_frame
-                source_of[t] = "yahoo"
-            elif not sch.empty:
-                # Shorter Schwab series and Yahoo is not longer: new listing.
-                source_of[t] = "schwab"
-    n_schwab = sum(1 for s in source_of.values() if s == "schwab")
-    n_yahoo = sum(1 for s in source_of.values() if s == "yahoo")
-    n_empty = len(tickers) - n_schwab - n_yahoo
-    logger.info(
-        "Daily prices: %d Schwab, %d Yahoo backup, %d empty",
-        n_schwab,
-        n_yahoo,
-        n_empty,
-    )
+    del chunk_size  # Schwab history is one symbol per request
+    n_schwab = sum(1 for t in tickers if not got.get(t, pd.DataFrame()).empty)
+    n_empty = len(tickers) - n_schwab
+    logger.info("Daily prices: %d Schwab, %d empty", n_schwab, n_empty)
     return _frame_to_multi(
         {t: got[t] for t in tickers if got.get(t) is not None and not got[t].empty}
     )
@@ -223,8 +175,7 @@ def download_prices(
     """
     Download OHLCV for many tickers.
 
-    ``source="schwab"`` uses Schwab market data and calls Yahoo only for
-    symbols whose Schwab history is empty or much shorter than requested.
+    ``source="schwab"`` uses Schwab market data only. A missing series stays empty.
     Returns MultiIndex columns (field, ticker).
     """
     if not tickers:
@@ -341,20 +292,13 @@ def _download_intraday_schwab(
         get_client,
     )
 
-    # RSI(14) on 4h needs ~16 bars; the screen asks for 20.
-    need = 20
     try:
         client = get_client()
     except (SchwabAPIError, SchwabNotConfiguredError) as exc:
-        logger.warning("Schwab intraday unavailable (%s); Yahoo for every symbol", exc)
-        return _yahoo_intraday(
-            tickers, interval=interval, period=period, chunk_size=chunk_size
-        )
+        logger.warning("Schwab intraday unavailable (%s)", exc)
+        return pd.DataFrame()
 
-    logger.info(
-        "Downloading 4h bars for %d tickers via Schwab (Yahoo backup)",
-        len(tickers),
-    )
+    logger.info("Downloading 4h bars for %d tickers via Schwab", len(tickers))
     got: dict[str, pd.DataFrame] = {}
 
     def _one(symbol: str) -> tuple[str, pd.DataFrame]:
@@ -370,27 +314,10 @@ def _download_intraday_schwab(
             symbol, frame = fut.result()
             got[symbol] = frame
 
-    backup = [t for t in tickers if len(got.get(t, pd.DataFrame())) < need]
-    filled_yahoo: set[str] = set()
-    if backup:
-        logger.info(
-            "Yahoo 4h backup for %d / %d symbols (< %d bars)",
-            len(backup),
-            len(tickers),
-            need,
-        )
-        yahoo = _yahoo_intraday(
-            backup, interval=interval, period=period, chunk_size=chunk_size
-        )
-        for t in backup:
-            yf_frame = _extract_ticker_frame(yahoo, t)
-            if len(yf_frame) > len(got.get(t, pd.DataFrame())):
-                got[t] = yf_frame
-                filled_yahoo.add(t)
+    del interval, period, chunk_size  # Schwab builds 4h from 30m candles
     n_empty = sum(1 for t in tickers if got.get(t) is None or got[t].empty)
-    n_yahoo = len(filled_yahoo)
-    n_schwab = len(tickers) - n_yahoo - n_empty
-    logger.info("4h bars: %d Schwab, %d Yahoo backup, %d empty", n_schwab, n_yahoo, n_empty)
+    n_schwab = len(tickers) - n_empty
+    logger.info("4h bars: %d Schwab, %d empty", n_schwab, n_empty)
     return _frame_to_multi(
         {t: got[t] for t in tickers if got.get(t) is not None and not got[t].empty}
     )
@@ -407,8 +334,7 @@ def download_intraday(
     """
     Download intraday OHLCV (e.g. 4h) for RSI / short-TF screens.
 
-    ``source="schwab"`` builds RTH 4h bars from Schwab 30m candles and calls
-    Yahoo only when that history is shorter than 20 bars.
+    ``source="schwab"`` builds RTH 4h bars from Schwab 30m candles.
     Returns MultiIndex columns (field, ticker).
     """
     if not tickers:
@@ -451,13 +377,14 @@ def _schwab_vix() -> float | None:
 
 
 def latest_vix(*, source: str = "yahoo") -> float | None:
-    """VIX spot. ``source="schwab"`` quotes ``$VIX`` and falls back to Yahoo ``^VIX``."""
+    """VIX spot. ``source="schwab"`` quotes ``$VIX`` only."""
     if (source or "yahoo").lower() == "schwab":
         vix = _schwab_vix()
         if vix is not None and vix > 0:
             logger.info("VIX from Schwab: %.2f", vix)
             return vix
-        logger.info("VIX: Schwab missing, Yahoo backup")
+        logger.info("VIX: Schwab quote missing")
+        return None
     try:
         hist = yf.Ticker("^VIX").history(period="5d", auto_adjust=True)
         if hist.empty:

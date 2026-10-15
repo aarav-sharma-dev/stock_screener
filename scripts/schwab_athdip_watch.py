@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """Live athdip watcher via Schwab RTH 4h RSI (+ optional Yahoo compare).
 
-Polls a watchlist (``screen_athdip.csv`` by default, or focus / --tickers),
-computes Schwab 30m→RTH 4h RSI, and alerts when RSI **crosses** ≤ threshold
-(default 31). First sighting of a symbol only seeds state (no alert) — same
-idea as thinkScript ``athdipOk and !athdipOk[1]``. Yahoo compare is opt-in
-(``--compare``); default is Schwab-only.
+Polls fresh-ATH setups (``athdip_setups.csv`` by default), computes Schwab
+RTH 4h RSI, and alerts when the minimum RSI over the last 5 calendar days
+crosses ≤ threshold (default 31). That is the same trigger as the screener.
+A name already below the threshold alerts once, then stays quiet until the
+minimum rises back above it. Yahoo compare is opt-in (``--compare``).
 
 Examples::
 
-  python3 scripts/schwab_athdip_watch.py --once --source screen --no-compare
+  python3 scripts/schwab_athdip_watch.py --once --source setups --no-compare
   python3 scripts/schwab_athdip_watch.py --interval 300 --no-compare
   python3 scripts/schwab_athdip_watch.py --tickers AMP,BAC,AEE --once
 """
@@ -38,13 +38,13 @@ import pandas as pd  # noqa: E402
 import requests  # noqa: E402
 import yfinance as yf  # noqa: E402
 
+from stock_screener.data.prices import download_intraday, series_for  # noqa: E402
 from stock_screener.data.schwab import (  # noqa: E402
     SchwabNotConfiguredError,
     get_client,
-    price_history_rth_4h,
     quote_last,
 )
-from stock_screener.features import compute_rsi_series  # noqa: E402
+from stock_screener.features import compute_rsi_series, min_rsi_lookback_detail  # noqa: E402
 
 OUTPUT = ROOT / "output"
 STATE_PATH = OUTPUT / "athdip_schwab_watch_state.json"
@@ -82,6 +82,20 @@ def _tickers_from_focus() -> list[str]:
     return list(dict.fromkeys(out))
 
 
+def _tickers_from_setups() -> list[str]:
+    path = OUTPUT / "athdip_setups.csv"
+    if not path.exists():
+        return []
+    df = pd.read_csv(path)
+    if "ticker" not in df.columns:
+        return []
+    return [
+        t
+        for t in df["ticker"].astype(str).str.strip().str.upper().tolist()
+        if t and t != "NAN"
+    ]
+
+
 def _tickers_from_screen() -> list[str]:
     path = OUTPUT / "screen_athdip.csv"
     if not path.exists():
@@ -103,21 +117,24 @@ def resolve_watchlist(tickers_arg: str, *, source: str = "screen") -> list[str]:
     flagged by the last screener/dashboard run (or an explicit --tickers list).
 
     source:
-      focus  — Today's focus rows tagged athdip only (narrow)
-      screen — all ``screen_athdip.csv`` names (default; includes BAC etc.)
-      all    — union of focus-athdip + screen_athdip
+      setups — fresh multi-year ATH names, before the RSI trigger (default)
+      screen — names that already passed athdip
+      focus  — Today's focus rows tagged athdip
+      all    — union of setups, screen, and focus
     """
     if tickers_arg.strip():
         return [t.strip().upper() for t in tickers_arg.split(",") if t.strip()]
     focus = _tickers_from_focus()
     screen = _tickers_from_screen()
-    src = (source or "screen").strip().lower()
+    setups = _tickers_from_setups()
+    src = (source or "setups").strip().lower()
     if src == "focus":
         return focus or screen
+    if src == "screen":
+        return screen or focus
     if src == "all":
-        return list(dict.fromkeys([*screen, *focus]))
-    # default: full athdip screen (not just focus)
-    return screen or focus
+        return list(dict.fromkeys([*setups, *screen, *focus]))
+    return setups or screen or focus
 
 
 def yahoo_rth_4h_rsi(symbol: str, *, period: str = "60d") -> float | None:
@@ -148,21 +165,37 @@ def yahoo_rth_4h_rsi(symbol: str, *, period: str = "60d") -> float | None:
     return float(rsi.iloc[-1])
 
 
-def schwab_rth_4h_rsi(symbol: str, client) -> tuple[float | None, float | None]:
-    """Return (last_rsi, last_close) from Schwab RTH 4h."""
-    end = pd.Timestamp.now(tz="UTC")
-    start = end - pd.Timedelta(days=25)
+def schwab_lookback_rsi(
+    symbols: list[str], *, lookback_days: int = 5
+) -> dict[str, tuple[float | None, float | None]]:
+    """Map symbol → (min 4h RSI over the lookback, last 4h RSI).
+
+    Uses the screener's Schwab 30m→RTH 4h bars and the same 5-calendar-day
+    minimum. The minimum is the trigger; the last print is only for the log.
+    """
+    out: dict[str, tuple[float | None, float | None]] = {
+        sym: (None, None) for sym in symbols
+    }
+    if not symbols:
+        return out
     try:
-        bars = price_history_rth_4h(symbol, client=client, start=start, end=end)
+        bars = download_intraday(
+            symbols, interval="4h", period="60d", source="schwab"
+        )
     except Exception as exc:  # noqa: BLE001
-        print(f"  {symbol}: Schwab history error: {exc}", file=sys.stderr)
-        return None, None
-    if bars.empty or len(bars) < 16:
-        return None, None
-    rsi = compute_rsi_series(bars["Close"], period=14).dropna()
-    if rsi.empty:
-        return None, None
-    return float(rsi.iloc[-1]), float(bars["Close"].iloc[-1])
+        print(f"Schwab 4h download failed: {exc}", file=sys.stderr)
+        return out
+    for sym in symbols:
+        close = series_for(bars, "Close", sym).dropna()
+        if len(close) < 16:
+            continue
+        rsi = compute_rsi_series(close, period=14).dropna()
+        last = float(rsi.iloc[-1]) if not rsi.empty else None
+        detail = min_rsi_lookback_detail(
+            close, lookback_days=lookback_days, period=14
+        )
+        out[sym] = (detail[0] if detail else None, last)
+    return out
 
 
 def load_state() -> dict:
@@ -217,42 +250,43 @@ def poll_once(
     client = get_client(interactive=False)
     state = load_state()
     prev = state.setdefault("tickers", {})
-    # First poll (or first sighting of a symbol): seed baseline only — do not
-    # treat "already ≤ rsi_max" as a fresh CROSS↓. Matches alert_new_signals
-    # snapshot seeding and thinkScript bubble logic (athdipOk and !athdipOk[1]).
+    # Alert when the 5-day minimum crosses ≤ threshold, including the first
+    # time a setup is seen already below. A repeat poll stays quiet.
     crossings: list[str] = []
     seeded: list[str] = []
     lines = [
         f"Athdip Schwab watch · {datetime.now().astimezone().strftime('%Y-%m-%d %H:%M %Z')}"
-        f" · RSI≤{rsi_max:.0f}"
+        f" · 5d min RSI≤{rsi_max:.0f}"
     ]
+    rsi_map = schwab_lookback_rsi(symbols)
 
     for sym in symbols:
-        s_rsi, s_px = schwab_rth_4h_rsi(sym, client)
+        rsi_min, rsi_last = rsi_map.get(sym, (None, None))
         y_rsi = yahoo_rth_4h_rsi(sym) if compare else None
         last = quote_last(sym, client=client)
-        px = last if last is not None else s_px
+        px = last
 
         had_prior = sym in prev and isinstance(prev.get(sym), dict) and "below" in (
             prev.get(sym) or {}
         )
         was_below = bool((prev.get(sym) or {}).get("below")) if had_prior else False
-        now_below = s_rsi is not None and s_rsi <= rsi_max
-        # Only alert on true transitions after a prior observation exists.
-        crossed = had_prior and now_below and not was_below
-        if not had_prior:
+        now_below = rsi_min is not None and rsi_min <= rsi_max
+        crossed = now_below and not was_below
+        if not had_prior and not now_below:
             seeded.append(sym)
 
         bit = f"  {sym}"
         if px is not None:
             bit += f" · Schwab ${px:.2f}"
-        if s_rsi is not None:
-            bit += f" · Schwab 4h RSI {s_rsi:.1f}"
+        if rsi_min is not None:
+            bit += f" · 5d min RSI {rsi_min:.1f}"
         else:
-            bit += " · Schwab 4h RSI n/a"
+            bit += " · 5d min RSI n/a"
+        if rsi_last is not None:
+            bit += f" · last {rsi_last:.1f}"
         if compare:
             if y_rsi is not None:
-                delta = (s_rsi - y_rsi) if s_rsi is not None else None
+                delta = (rsi_min - y_rsi) if rsi_min is not None else None
                 bit += f" · Yahoo 4h RSI {y_rsi:.1f}"
                 if delta is not None:
                     bit += f" · Δ{delta:+.1f}"
@@ -260,15 +294,16 @@ def poll_once(
                 bit += " · Yahoo 4h RSI n/a"
         if now_below:
             bit += " · BELOW"
-        if not had_prior:
-            bit += " · SEED"
-        elif crossed:
+        if crossed:
             bit += " · CROSS↓"
             crossings.append(sym)
+        elif not had_prior:
+            bit += " · SEED"
 
         lines.append(bit)
         prev[sym] = {
-            "schwab_rsi": s_rsi,
+            "schwab_rsi": rsi_min,
+            "schwab_rsi_last": rsi_last,
             "yahoo_rsi": y_rsi,
             "price": px,
             "below": now_below,
@@ -305,9 +340,9 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--tickers", default="", help="Comma list (else from last screen/focus)")
     p.add_argument(
         "--source",
-        choices=("screen", "focus", "all"),
-        default="screen",
-        help="screen=all athdip CSV (default); focus=Today's focus athdip only; all=union",
+        choices=("setups", "screen", "focus", "all"),
+        default="setups",
+        help="setups=fresh ATH names (default); screen=already triggered; focus=Today's focus; all=union",
     )
     p.add_argument("--rsi-max", type=float, default=DEFAULT_RSI_MAX)
     p.add_argument("--once", action="store_true", help="Single poll then exit")

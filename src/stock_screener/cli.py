@@ -267,6 +267,11 @@ def main(argv: list[str] | None = None) -> int:
         enable_polymarket=not args.no_polymarket,
         enable_institutions=not args.no_institutions,
         price_source=args.price_source,
+        athdip_setups_path=(
+            str(args.output.parent / "athdip_setups.csv")
+            if args.mode in {"athdip", "all"}
+            else ""
+        ),
     )
 
     (
