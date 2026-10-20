@@ -18,6 +18,11 @@ Optional Schwab live last price on alert lines (default **on** when OAuth
 token exists; disable with ``--no-schwab-quotes`` or
 ``SCREENER_SLACK_SCHWAB_QUOTES=0``).
 
+When ``output/institutions_13f_history.csv`` exists, a new ticker held by
+two or more tracked managers — or inside one manager's top 10 weights —
+gets a ``13F:`` note. Refresh that file with
+``python src/stock_screener/data/institutions_history.py 8``.
+
 Near-real-time: re-run the daily screen on an interval (e.g. Cursor ``/loop 30m``
 or cron), then this script — the screener itself is batch, not a live stream.
 """
@@ -344,6 +349,7 @@ def format_alert(
     *,
     schwab_last: dict[str, float] | None = None,
     modes_label: str | None = None,
+    institution_notes: dict[str, str] | None = None,
 ) -> str:
     lines: list[str] = []
     header = f"Screener new signals · {cur.get('as_of')}"
@@ -352,6 +358,7 @@ def format_alert(
     lines.append(header)
     meta = cur.get("ticker_meta") or {}
     prices = schwab_last or {}
+    notes = institution_notes or {}
 
     def _px(t: str) -> str:
         v = prices.get(t)
@@ -376,6 +383,8 @@ def format_alert(
                 bit += f" · {rsi}"
             if modes:
                 bit += f" · {modes}"
+            if notes.get(t):
+                bit += f" · {notes[t]}"
             if why:
                 bit += f" — {why}"
             lines.append(bit)
@@ -396,6 +405,8 @@ def format_alert(
                 if m.get("surprise") is not None:
                     bit += f" / surprise {m['surprise']:+.1f}%"
             bit += f" · {modes}"
+            if notes.get(t):
+                bit += f" · {notes[t]}"
             lines.append(bit)
     if new.get("by_mode"):
         lines.append("")
@@ -517,8 +528,23 @@ def run(
             except Exception as exc:  # noqa: BLE001
                 print(f"Schwab quotes skipped: {exc}", file=sys.stderr)
 
+    institution_notes: dict[str, str] = {}
+    note_tickers = sorted(set(new.get("all") or []) | set(new.get("focus") or []))
+    if note_tickers:
+        try:
+            sys.path.insert(0, str(ROOT / "src"))
+            from stock_screener.data.institutions_history import notes_for_tickers
+
+            institution_notes = notes_for_tickers(note_tickers)
+        except Exception as exc:  # noqa: BLE001
+            print(f"13F notes skipped: {exc}", file=sys.stderr)
+
     msg = format_alert(
-        new, cur, schwab_last=schwab_last or None, modes_label=modes_label
+        new,
+        cur,
+        schwab_last=schwab_last or None,
+        modes_label=modes_label,
+        institution_notes=institution_notes or None,
     )
     print(msg)
 
