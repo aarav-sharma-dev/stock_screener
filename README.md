@@ -117,7 +117,7 @@ After a screen run, rebuild the Cursor canvas + `output/today_focus.csv`:
 python3 scripts/build_screen_dashboard.py
 ```
 
-That also diffs vs `output/signal_snapshot.json` and alerts on **new** symbols (stdout + macOS notification; Slack if `SCREENER_SLACK_WEBHOOK` is set). Alerts include **BUY/SELL/MIXED** lean plus **daily RSI** (and **4h RSI** when athdip). First run only saves a baseline.
+That also diffs vs `output/signal_snapshot.json` and alerts when a symbol enters Today's focus or the top of a mode (stdout + macOS notification; Slack if `SCREENER_SLACK_WEBHOOK` is set). Slack shows at most 8 new focus names, then the top 5 of each mode that changed (politicians: 3 buys and 3 sells). Alerts include **BUY/SELL/MIXED** lean plus **daily RSI** (and **4h RSI** when athdip). First run only saves a baseline.
 
 ### Cron (VM) — Schwab every 30m + Yahoo open/close
 

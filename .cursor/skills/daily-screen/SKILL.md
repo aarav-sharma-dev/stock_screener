@@ -48,7 +48,10 @@ After each dashboard build, `scripts/alert_new_signals.py` diffs current
 `output/screen_*.csv` + `today_focus.csv` against `output/signal_snapshot.json`.
 
 - **First run** seeds a baseline (no alert flood).
-- Later runs alert on tickers that were **not** in the previous snapshot.
+- Later runs alert when a ticker **enters Today's focus** or the **top of a mode**
+  (top 5 by score; politicians are 3 buys and 3 sells). Slack prints the new
+  focus names (capped at 8) and that short top-of-book line. A name that only
+  appears further down a mode list does not alert.
 - Channels: stdout always; macOS Notification Center on Darwin; Slack if
   `SCREENER_SLACK_WEBHOOK` or `SLACK_WEBHOOK_URL` is set in `.env`.
 
