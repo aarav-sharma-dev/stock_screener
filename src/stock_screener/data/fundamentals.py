@@ -224,12 +224,48 @@ def _compute_fcf_yield(fcf: float | None, market_cap: float | None) -> float | N
     return fcf / market_cap
 
 
-def fetch_fundamentals(ticker: str) -> FundamentalsSnapshot | None:
-    try:
-        info = yf.Ticker(ticker).info or {}
-    except Exception as exc:  # noqa: BLE001
-        logger.debug("Fundamentals fetch failed for %s: %s", ticker, exc)
-        return None
+def _schwab_info(raw: dict) -> dict:
+    """Map a Schwab fundamental block onto the Yahoo info keys the scorer uses.
+
+    Schwab sends margins, growth, and dividend yield as percents (48.6 = 48.6%).
+    The scorer expects fractions. Multiples (P/E, PEG, P/S, P/B) stay as ratios.
+    """
+
+    def num(*keys: str) -> float | None:
+        return _f(raw, *keys)
+
+    def pct(*keys: str) -> float | None:
+        v = num(*keys)
+        return None if v is None else v / 100.0
+
+    return {
+        "revenueGrowth": pct("revChangeTTM", "revChangeYear"),
+        "earningsGrowth": pct("epsChangePercentTTM"),
+        "grossMargins": pct("grossMarginTTM"),
+        "operatingMargins": pct("operatingMarginTTM"),
+        "profitMargins": pct("netProfitMarginTTM"),
+        "debtToEquity": num("totalDebtToEquity"),
+        "currentRatio": num("currentRatio"),
+        "returnOnEquity": num("returnOnEquity"),
+        "returnOnAssets": num("returnOnAssets"),
+        "dividendYield": pct("dividendYield"),
+        "trailingPE": num("peRatio"),
+        "priceToSalesTrailing12Months": num("prRatio"),
+        "priceToBook": num("pbRatio"),
+        "pegRatio": num("pegRatio"),
+        "marketCap": num("marketCap"),
+    }
+
+
+def fetch_fundamentals(
+    ticker: str, info: dict | None = None
+) -> FundamentalsSnapshot | None:
+    if info is None:
+        try:
+            info = yf.Ticker(ticker).info or {}
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("Fundamentals fetch failed for %s: %s", ticker, exc)
+            return None
     if not info or info.get("trailingPegRatio") == "None" and not info.get("sector"):
         # still try — many fields may exist
         pass
@@ -379,10 +415,44 @@ def fetch_fundamentals(ticker: str) -> FundamentalsSnapshot | None:
 def fetch_fundamentals_map(
     tickers: list[str],
     max_workers: int = 6,
+    source: str = "yahoo",
 ) -> dict[str, FundamentalsSnapshot]:
     out: dict[str, FundamentalsSnapshot] = {}
     if not tickers:
         return out
+    if (source or "yahoo").lower() == "schwab":
+        from stock_screener.data.schwab import (
+            SchwabAPIError,
+            SchwabNotConfiguredError,
+            get_client,
+            instrument_fundamental,
+        )
+
+        logger.info("Fetching fundamentals for %d tickers via Schwab", len(tickers))
+        try:
+            client = get_client()
+        except (SchwabAPIError, SchwabNotConfiguredError) as exc:
+            logger.warning("Schwab fundamentals unavailable (%s)", exc)
+            return out
+
+        def _one_schwab(t: str) -> tuple[str, FundamentalsSnapshot | None]:
+            try:
+                raw = instrument_fundamental(t, client=client)
+            except Exception as exc:  # noqa: BLE001
+                logger.info("Schwab fundamental %s failed: %s", t, exc.__class__.__name__)
+                return t, None
+            if not raw:
+                return t, None
+            return t, fetch_fundamentals(t, info=_schwab_info(raw))
+
+        with ThreadPoolExecutor(max_workers=max_workers) as pool:
+            futures = [pool.submit(_one_schwab, t) for t in tickers]
+            for fut in as_completed(futures):
+                t, snap = fut.result()
+                if snap is not None:
+                    out[t] = snap
+        return out
+
     logger.info("Fetching fundamentals for %d tickers via yfinance", len(tickers))
 
     def _one(t: str) -> tuple[str, FundamentalsSnapshot | None]:

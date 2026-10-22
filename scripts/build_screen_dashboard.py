@@ -3,7 +3,7 @@
 
 Reproducible dashboard for anyone with a fresh screener run:
 
-  stock-screener --mode all --universe sp500 --limit 80 --top 25 \\
+  stock-screener --mode all --universe sp500 --top 25 \\
     --allow-below-200 --no-reddit --no-grok --no-trump-x
   python3 scripts/build_screen_dashboard.py
 
@@ -1370,7 +1370,7 @@ export default function ScreenDashboard() {{
         <CardBody>
           <Stack gap={{6}}>
             <Text style={{{{ fontFamily: "monospace", fontSize: 12 }}}}>
-              stock-screener --mode all --universe sp500 --limit 80 --no-reddit --no-grok --no-trump-x
+              stock-screener --mode all --universe sp500 --no-reddit --no-grok --no-trump-x
             </Text>
             <Text style={{{{ fontFamily: "monospace", fontSize: 12 }}}}>
               python3 scripts/build_screen_dashboard.py

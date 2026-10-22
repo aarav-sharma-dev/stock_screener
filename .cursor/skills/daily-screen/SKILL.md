@@ -20,8 +20,9 @@ Anyone with this repo can reproduce today's multi-mode screen and the **Today's 
 cd /path/to/stock-screener
 source .venv/bin/activate
 
-# 1) Live screen (writes output/screen_*.csv)
-stock-screener --mode all --universe sp500 --limit 80 --top 25 \
+# 1) Live screen on the full S&P 500 plus theme extras (writes output/screen_*.csv
+# and output/athdip_setups.csv).
+stock-screener --mode all --universe sp500 --top 25 \
   --allow-below-200 --no-reddit --no-grok --no-trump-x \
   --price-source schwab \
   --output output/screen.csv 2>&1 | tee output/run_today.log
@@ -66,7 +67,7 @@ append a `13F:` note from `output/institutions_13f_history.csv` when that file e
 Locally you can still use Cursor `/loop 30m` with this skill or:
 
 ```bash
-python3 scripts/schwab_athdip_watch.py --once --source screen --no-compare
+python3 scripts/schwab_athdip_watch.py --once --source setups --no-compare
 ```
 
 ```bash

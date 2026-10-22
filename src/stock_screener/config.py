@@ -55,6 +55,11 @@ class ScreenerConfig:
     athdip_fresh_high_days: int = 21  # breakout window used at ATH time
     athdip_max_days_since_ath: int = 63  # watch pullbacks for ~3 months after ATH
     athdip_rsi_lookback_days: int = 5  # min 4h RSI over this many calendar days (catch mid-week dips)
+    # Extra names on top of the AI / semiconductor / energy / nuclear list
+    # in universe.ATHDIP_THEME_EXTRAS. TSM lives in that list.
+    athdip_extra_tickers: tuple[str, ...] = ()
+    # Set by the CLI to output/athdip_setups.csv. Empty skips the write.
+    athdip_setups_path: str = ""
     athdip_require_multi_year_break: bool = True  # require break-at-ATH setup
     athdip_require_near_ath_pct: bool = False
     athdip_drop_death_cross: bool = False
