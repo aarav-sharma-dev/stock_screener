@@ -9,6 +9,13 @@ Alerts (any that are configured):
   - macOS Notification Center (default on Darwin; ``--no-desktop`` to skip)
   - Slack incoming webhook if ``SCREENER_SLACK_WEBHOOK`` or ``SLACK_WEBHOOK_URL`` is set
 
+Slack posts two short blocks, not the full screen:
+  - Today's focus, capped at 8 new names (athdip, overlaps, one leader per mode)
+  - Top of each mode that gained a name: 5 by score, or 3 buys and 3 sells
+    for politicians. Names already in the focus block are left off that line.
+  A name alerts when it enters focus or that top book, not when it merely
+  passes the mode filter.
+
 Per-mode Slack / alert filters:
   - ``--modes athdip,support`` or env ``SCREENER_SLACK_MODES=athdip,support``
   - Only new symbols touching those modes (or focus rows tagged with them) alert
@@ -17,6 +24,11 @@ Per-mode Slack / alert filters:
 Optional Schwab live last price on alert lines (default **on** when OAuth
 token exists; disable with ``--no-schwab-quotes`` or
 ``SCREENER_SLACK_SCHWAB_QUOTES=0``).
+
+When ``output/institutions_13f_history.csv`` exists, a new ticker held by
+two or more tracked managers — or inside one manager's top 10 weights —
+gets a ``13F:`` note. Refresh that file with
+``python src/stock_screener/data/institutions_history.py 8``.
 
 Near-real-time: re-run the daily screen on an interval (e.g. Cursor ``/loop 30m``
 or cron), then this script — the screener itself is batch, not a live stream.
@@ -49,6 +61,20 @@ MODES = (
     "catalyst",
     "fundamentals",
     "politicians",
+    "trump",
+    "athdip",
+    "pead",
+)
+FOCUS_CAP = 8
+MODE_TOP_N = 5
+POL_SIDE_N = 3
+# Ranked books stored on the snapshot. Politicians are split by side.
+TOP_BOOKS = (
+    "support",
+    "catalyst",
+    "fundamentals",
+    "politicians_buy",
+    "politicians_sell",
     "trump",
     "athdip",
     "pead",
@@ -99,6 +125,86 @@ def _tickers_from_csv(path: Path) -> list[str]:
         seen.add(t)
         out.append(t)
     return out
+
+
+def _mode_csv(output: Path, mode: str) -> Path | None:
+    path = output / f"screen_{mode}.csv"
+    if path.exists():
+        return path
+    if mode == "support":
+        alt = output / "screen.csv"
+        if alt.exists():
+            return alt
+    return None
+
+
+def _score_series(df: pd.DataFrame) -> pd.Series:
+    if "composite" in df.columns:
+        scores = pd.to_numeric(df["composite"], errors="coerce")
+        if scores.notna().any():
+            return scores
+    if "score" in df.columns:
+        return pd.to_numeric(df["score"], errors="coerce")
+    return pd.Series(0.0, index=df.index)
+
+
+def _ranked_tickers(df: pd.DataFrame, n: int) -> list[str]:
+    """Highest composite/score first. File order is the tie-break fallback."""
+    if df is None or df.empty or "ticker" not in df.columns or n <= 0:
+        return []
+    work = df.copy()
+    work["_rank"] = _score_series(work)
+    work = work.sort_values(
+        ["_rank", "ticker"], ascending=[False, True], na_position="last"
+    )
+    out: list[str] = []
+    seen: set[str] = set()
+    for raw in work["ticker"].astype(str):
+        t = raw.strip().upper()
+        if not t or t == "NAN" or t in seen:
+            continue
+        seen.add(t)
+        out.append(t)
+        if len(out) >= n:
+            break
+    return out
+
+
+def _politician_sides(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
+    if df.empty or "buy_count" not in df.columns:
+        return df.iloc[0:0], df.iloc[0:0]
+    buys_n = pd.to_numeric(df["buy_count"], errors="coerce").fillna(0)
+    if "sell_count" in df.columns:
+        sells_n = pd.to_numeric(df["sell_count"], errors="coerce").fillna(0)
+    else:
+        sells_n = pd.Series(0, index=df.index)
+    return df.loc[buys_n > sells_n], df.loc[sells_n > buys_n]
+
+
+def top_books(output: Path = OUTPUT) -> dict[str, list[str]]:
+    """Current top of each mode. Empty list means the screen had no rows."""
+    books: dict[str, list[str]] = {name: [] for name in TOP_BOOKS}
+    for mode in MODES:
+        path = _mode_csv(output, mode)
+        if path is None:
+            continue
+        try:
+            df = pd.read_csv(path)
+        except Exception:  # noqa: BLE001
+            continue
+        if mode == "politicians":
+            buy_df, sell_df = _politician_sides(df)
+            books["politicians_buy"] = _ranked_tickers(buy_df, POL_SIDE_N)
+            books["politicians_sell"] = _ranked_tickers(sell_df, POL_SIDE_N)
+        else:
+            books[mode] = _ranked_tickers(df, MODE_TOP_N)
+    return books
+
+
+def _book_mode(book: str) -> str:
+    if book.startswith("politicians_"):
+        return "politicians"
+    return book
 
 
 def _metrics_from_modes(output: Path) -> dict[str, dict]:
@@ -256,6 +362,7 @@ def collect_current(output: Path = OUTPUT) -> dict:
         "as_of": datetime.now(timezone.utc).strftime("%Y-%m-%d"),
         "updated_at": datetime.now(timezone.utc).isoformat(),
         "by_mode": by_mode,
+        "top": top_books(output),
         "focus": [r["ticker"] for r in focus_rows],
         "focus_detail": focus_rows,
         "ticker_meta": ticker_meta,
@@ -277,21 +384,44 @@ def save_snapshot(data: dict, path: Path = SNAPSHOT) -> None:
     path.write_text(json.dumps(data, indent=2), encoding="utf-8")
 
 
-def diff_new(prev: dict, cur: dict) -> dict[str, list[str]]:
-    """Return new tickers overall and per mode / focus."""
-    prev_all = set(prev.get("all") or [])
-    prev_focus = set(prev.get("focus") or [])
-    prev_modes = prev.get("by_mode") or {}
+def _previous_book(prev: dict, book: str) -> set[str] | None:
+    """Prior top-of-book membership.
 
-    new_all = [t for t in cur.get("all") or [] if t not in prev_all]
+    ``None`` means this snapshot has no ranked book yet (older alert files).
+    Callers then treat the full mode list as already seen so a deploy does
+    not re-alert the whole screen.
+    """
+    stored = prev.get("top")
+    if isinstance(stored, dict) and book in stored:
+        return {str(t).strip().upper() for t in (stored.get(book) or []) if t}
+    return None
+
+
+def diff_new(prev: dict, cur: dict) -> dict:
+    """New focus names, plus names that entered the top of a mode."""
+    prev_focus = {str(t).strip().upper() for t in (prev.get("focus") or [])}
     new_focus = [t for t in cur.get("focus") or [] if t not in prev_focus]
-    new_by_mode: dict[str, list[str]] = {}
-    for mode, tickers in (cur.get("by_mode") or {}).items():
-        before = set(prev_modes.get(mode) or [])
+
+    prev_modes = prev.get("by_mode") or {}
+    new_top: dict[str, list[str]] = {}
+    for book, tickers in (cur.get("top") or {}).items():
+        before = _previous_book(prev, book)
+        if before is None:
+            mode = _book_mode(book)
+            before = {
+                str(t).strip().upper() for t in (prev_modes.get(mode) or []) if t
+            }
         added = [t for t in tickers if t not in before]
         if added:
-            new_by_mode[mode] = added
-    return {"all": new_all, "focus": new_focus, "by_mode": new_by_mode}
+            new_top[book] = added
+
+    seen: set[str] = set()
+    new_all: list[str] = []
+    for t in list(new_focus) + [t for ts in new_top.values() for t in ts]:
+        if t not in seen:
+            seen.add(t)
+            new_all.append(t)
+    return {"all": new_all, "focus": new_focus, "top": new_top}
 
 
 def parse_modes_filter(raw: str | None) -> set[str] | None:
@@ -315,23 +445,26 @@ def filter_new_by_modes(new: dict, cur: dict, modes: set[str] | None) -> dict:
     detail = {r["ticker"]: r for r in (cur.get("focus_detail") or [])}
 
     def _touches(ticker: str) -> bool:
-        if any(ticker in (new.get("by_mode") or {}).get(m, []) for m in modes):
-            return True
         if any(ticker in ((cur.get("by_mode") or {}).get(m) or []) for m in modes):
-            # newly in focus but already in a watched mode screen
-            return ticker in (new.get("focus") or [])
+            return True
         tags = (detail.get(ticker) or {}).get("tags") or ""
         tags_l = tags.lower()
         return any(m in tags_l for m in modes)
 
     focus = [t for t in (new.get("focus") or []) if _touches(t)]
-    all_t = [t for t in (new.get("all") or []) if _touches(t)]
-    by_mode = {
-        m: ts
-        for m, ts in (new.get("by_mode") or {}).items()
-        if m in modes and ts
+    top = {
+        book: [t for t in tickers if _touches(t)]
+        for book, tickers in (new.get("top") or {}).items()
+        if _book_mode(book) in modes
     }
-    return {"all": all_t, "focus": focus, "by_mode": by_mode}
+    top = {book: tickers for book, tickers in top.items() if tickers}
+    seen: set[str] = set()
+    all_t: list[str] = []
+    for t in list(focus) + [t for ts in top.values() for t in ts]:
+        if t not in seen:
+            seen.add(t)
+            all_t.append(t)
+    return {"all": all_t, "focus": focus, "top": top}
 
 
 def _modes_for(ticker: str, cur: dict) -> list[str]:
@@ -344,6 +477,7 @@ def format_alert(
     *,
     schwab_last: dict[str, float] | None = None,
     modes_label: str | None = None,
+    institution_notes: dict[str, str] | None = None,
 ) -> str:
     lines: list[str] = []
     header = f"Screener new signals · {cur.get('as_of')}"
@@ -352,16 +486,34 @@ def format_alert(
     lines.append(header)
     meta = cur.get("ticker_meta") or {}
     prices = schwab_last or {}
+    notes = institution_notes or {}
 
     def _px(t: str) -> str:
         v = prices.get(t)
         return f" · Schwab ${v:.2f}" if v is not None else ""
 
-    if new.get("focus"):
+    def _compact(tickers: list[str], fresh: set[str], skip: set[str]) -> str:
+        bits: list[str] = []
+        for t in tickers:
+            if t in skip:
+                continue
+            m = meta.get(t) or {}
+            label = f"+{t}" if t in fresh else t
+            rsi = _fmt_rsi(m.get("rsi14"), m.get("rsi4h"))
+            if rsi:
+                label += f" ({rsi})"
+            if t in fresh and notes.get(t):
+                label += f" · {notes[t]}"
+            bits.append(label)
+        return ", ".join(bits)
+
+    focus_new = list(new.get("focus") or [])
+    shown = focus_new[:FOCUS_CAP]
+    if shown:
         lines.append("")
-        lines.append("New in Today's focus:")
+        lines.append("Focus")
         detail = {r["ticker"]: r for r in (cur.get("focus_detail") or [])}
-        for t in new["focus"]:
+        for t in shown:
             d = detail.get(t) or {}
             why = d.get("why") or ""
             kind = d.get("kind") or ""
@@ -376,41 +528,59 @@ def format_alert(
                 bit += f" · {rsi}"
             if modes:
                 bit += f" · {modes}"
+            if notes.get(t):
+                bit += f" · {notes[t]}"
             if why:
                 bit += f" — {why}"
             lines.append(bit)
-    if new.get("all"):
+        extra = len(focus_new) - len(shown)
+        if extra:
+            lines.append(f"  … +{extra} more in Today's focus")
+
+    def _has_fresh(tickers: list[str], fresh: set[str]) -> bool:
+        return any(t in fresh and t not in shown_set for t in tickers)
+
+    changed = new.get("top") or {}
+    current_top = cur.get("top") or {}
+    shown_set = set(shown)
+    top_lines: list[str] = []
+    for mode in ("support", "catalyst", "fundamentals", "trump", "athdip", "pead"):
+        if mode not in changed:
+            continue
+        ranked = current_top.get(mode) or []
+        fresh = set(changed[mode])
+        if not _has_fresh(ranked, fresh):
+            continue
+        body = _compact(ranked, fresh, shown_set)
+        if body:
+            top_lines.append(f"  {mode}: {body}")
+    if "politicians_buy" in changed or "politicians_sell" in changed:
+        parts: list[str] = []
+        buy_ranked = current_top.get("politicians_buy") or []
+        sell_ranked = current_top.get("politicians_sell") or []
+        buy_fresh = set(changed.get("politicians_buy") or [])
+        sell_fresh = set(changed.get("politicians_sell") or [])
+        buy = (
+            _compact(buy_ranked, buy_fresh, shown_set)
+            if _has_fresh(buy_ranked, buy_fresh)
+            else ""
+        )
+        sell = (
+            _compact(sell_ranked, sell_fresh, shown_set)
+            if _has_fresh(sell_ranked, sell_fresh)
+            else ""
+        )
+        if buy:
+            parts.append(f"BUY {buy}")
+        if sell:
+            parts.append(f"SELL {sell}")
+        if parts:
+            top_lines.append("  politicians: " + " · ".join(parts))
+    if top_lines:
         lines.append("")
-        lines.append("New in any mode:")
-        for t in new["all"]:
-            m = meta.get(t) or {}
-            signal = m.get("signal") or "BUY"
-            rsi = _fmt_rsi(m.get("rsi14"), m.get("rsi4h"))
-            modes = ", ".join(_modes_for(t, cur)) or "?"
-            bit = f"  • {t} · {signal}"
-            bit += _px(t)
-            if rsi:
-                bit += f" · {rsi}"
-            if m.get("ear") is not None:
-                bit += f" · EAR {m['ear']:+.1f}%"
-                if m.get("surprise") is not None:
-                    bit += f" / surprise {m['surprise']:+.1f}%"
-            bit += f" · {modes}"
-            lines.append(bit)
-    if new.get("by_mode"):
-        lines.append("")
-        lines.append("By mode:")
-        for mode, tickers in new["by_mode"].items():
-            bits = []
-            for t in tickers:
-                m = meta.get(t) or {}
-                rsi = _fmt_rsi(m.get("rsi14"), m.get("rsi4h"))
-                label = t
-                if rsi:
-                    label += f" ({rsi})"
-                bits.append(label)
-            lines.append(f"  {mode}: {', '.join(bits)}")
-    if not new.get("all") and not new.get("focus"):
+        lines.append("Top 5 not already listed")
+        lines.extend(top_lines)
+    if not shown and not top_lines:
         lines.append("No new symbols vs last snapshot.")
     return "\n".join(lines)
 
@@ -517,12 +687,27 @@ def run(
             except Exception as exc:  # noqa: BLE001
                 print(f"Schwab quotes skipped: {exc}", file=sys.stderr)
 
+    institution_notes: dict[str, str] = {}
+    note_tickers = sorted(set(new.get("all") or []) | set(new.get("focus") or []))
+    if note_tickers:
+        try:
+            sys.path.insert(0, str(ROOT / "src"))
+            from stock_screener.data.institutions_history import notes_for_tickers
+
+            institution_notes = notes_for_tickers(note_tickers)
+        except Exception as exc:  # noqa: BLE001
+            print(f"13F notes skipped: {exc}", file=sys.stderr)
+
     msg = format_alert(
-        new, cur, schwab_last=schwab_last or None, modes_label=modes_label
+        new,
+        cur,
+        schwab_last=schwab_last or None,
+        modes_label=modes_label,
+        institution_notes=institution_notes or None,
     )
     print(msg)
 
-    has_new = bool(new.get("all") or new.get("focus") or new.get("by_mode"))
+    has_new = bool(new.get("all") or new.get("focus") or new.get("top"))
     if has_new and not dry_run:
         if desktop:
             n = len(set(new.get("all") or []) | set(new.get("focus") or []))

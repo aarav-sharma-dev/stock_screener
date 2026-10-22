@@ -5,6 +5,8 @@
 #   CRON_TZ=America/Chicago
 #   */30 6-18 * * 1-5  /home/asharma/bin/stock-screener-alert.sh
 #   0 19 * * 1-5       /home/asharma/bin/stock-screener-alert.sh
+#   15 8 * * 0         /home/asharma/bin/schwab-refresh.sh
+#   15 7 * * 1-5       /home/asharma/bin/institutions-13f-refresh.sh
 #
 # Behavior:
 #   06:00 CT (Mon–Fri)     → every mode on the full universe (S&P 500 + extras)

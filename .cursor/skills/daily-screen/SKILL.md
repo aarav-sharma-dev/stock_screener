@@ -49,14 +49,21 @@ After each dashboard build, `scripts/alert_new_signals.py` diffs current
 `output/screen_*.csv` + `today_focus.csv` against `output/signal_snapshot.json`.
 
 - **First run** seeds a baseline (no alert flood).
-- Later runs alert on tickers that were **not** in the previous snapshot.
+- Later runs alert when a ticker **enters Today's focus** or the **top of a mode**
+  (top 5 by score; politicians are 3 buys and 3 sells). Slack prints the new
+  focus names (capped at 8) and that short top-of-book line. A name that only
+  appears further down a mode list does not alert.
 - Channels: stdout always; macOS Notification Center on Darwin; Slack if
   `SCREENER_SLACK_WEBHOOK` or `SLACK_WEBHOOK_URL` is set in `.env`.
 
-Near-real-time: on the VM cron, mid-day `*/30` reruns athdip on the full universe.
-Full screens at **06:00** and **19:00** CT use `--price-source schwab` for prices
-and fundamentals. Schwab has no headline feed, next earnings date, or EPS
-surprise, so those inputs stay neutral. A rejected Schwab login Slacks once per day.
+Near-real-time: on the VM cron, mid-day `*/30` runs **Schwab** athdip watch.
+Full screens at **06:00** and **19:00** CT use `--price-source schwab` (Yahoo only
+when a symbol's Schwab history is missing or short). News, fundamentals, and
+earnings dates stay on Yahoo. Sunday 08:15 CT runs `scripts/schwab-refresh.sh`
+to rotate the refresh token. Weekday 07:15 CT runs
+`scripts/institutions-13f-refresh.sh`, which downloads 13F holdings on the first
+weekday after each filing deadline and otherwise does nothing. New-signal alerts
+append a `13F:` note from `output/institutions_13f_history.csv` when that file exists.
 Locally you can still use Cursor `/loop 30m` with this skill or:
 
 ```bash

@@ -117,7 +117,7 @@ After a screen run, rebuild the Cursor canvas + `output/today_focus.csv`:
 python3 scripts/build_screen_dashboard.py
 ```
 
-That also diffs vs `output/signal_snapshot.json` and alerts on **new** symbols (stdout + macOS notification; Slack if `SCREENER_SLACK_WEBHOOK` is set). Alerts include **BUY/SELL/MIXED** lean plus **daily RSI** (and **4h RSI** when athdip). First run only saves a baseline.
+That also diffs vs `output/signal_snapshot.json` and alerts when a symbol enters Today's focus or the top of a mode (stdout + macOS notification; Slack if `SCREENER_SLACK_WEBHOOK` is set). Slack shows at most 8 new focus names, then the top 5 of each mode that changed (politicians: 3 buys and 3 sells). Alerts include **BUY/SELL/MIXED** lean plus **daily RSI** (and **4h RSI** when athdip). First run only saves a baseline.
 
 ### Cron (VM) — Schwab every 30m + Yahoo open/close
 
@@ -127,6 +127,8 @@ Keep your existing crontab; only the **script** switches mid-day to Schwab:
 CRON_TZ=America/Chicago
 */30 6-18 * * 1-5 /home/asharma/bin/stock-screener-alert.sh
 0 19 * * 1-5 /home/asharma/bin/stock-screener-alert.sh
+15 8 * * 0 /home/asharma/bin/schwab-refresh.sh
+15 7 * * 1-5 /home/asharma/bin/institutions-13f-refresh.sh
 ```
 
 | When (CT) | Mode |
@@ -134,6 +136,8 @@ CRON_TZ=America/Chicago
 | **06:00** | Every mode on the full universe (S&P 500 plus the AI, chip, energy, nuclear, and ETF names). Prices and fundamentals come from **Schwab** only. Schwab has no headline feed, next earnings date, or EPS surprise, so those inputs stay neutral. A rejected Schwab login sends one Slack message per day. Writes `athdip_setups.csv` and `screen_athdip.csv` |
 | **06:30–18:30** `*/30` | Athdip again on the **full universe** (S&P 500 plus the extra AI, chip, energy, nuclear, and ETF names). Alerts only tickers that were not already in the snapshot |
 | **19:00** | Same full screen again (EOD new-symbol Slack) |
+| **Sunday 08:15** | Rotate the Schwab refresh token (`scripts/schwab-refresh.sh`). Weekday scans already rotate it; this covers a quiet week. A dead login still needs `scripts/schwab_auth.py` on the VM. |
+| **Weekdays 07:15** | Refresh the curated 13F cache on the first weekday after each filing deadline (Feb 14, May 15, Aug 14, Nov 14). Other mornings the script exits without downloading. New-signal alerts then append a `13F:` note for names those managers hold. |
 
 Deploy after `git pull` on the VM:
 
