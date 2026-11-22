@@ -1,0 +1,18 @@
+---
+description: Review #vli-research-notes a few times a day for crowding notes that affect screener signals
+alwaysApply: true
+---
+
+# Research notes check
+
+Channel: `#vli-research-notes` (`C0B0ELTG1GT`).
+
+The VM cron owns the schedule: 8:00 AM, 12:30 PM, and 5:00 PM America/Chicago, via `scripts/vli-research-notes-check.sh`. Do not start a sleeper in this chat for that schedule. Read the channel when the user asks about it or whether new research should change signals. Do not read it during unrelated coding work.
+
+On a check, read only posts since the previous check (or the last 18 hours if this chat has no prior check). Summarize a note only when it changes the crowding read for names already on the screen:
+
+- Prime-book or hedge-fund flows, leverage, and long/short percentiles
+- Software versus semis, hyperscalers, hardware, and memory positioning
+- A sector tape that confirms or fades those flows
+
+Skip one-off headlines, tweet links, and options-vol comments unless a number ties them to a screen name. Treat broker text as context, not a new buy rule or a score weight. Do not start a second daily checker if this chat already has one running.

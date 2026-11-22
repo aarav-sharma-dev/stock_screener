@@ -158,6 +158,9 @@ CRON_TZ=America/Chicago
 0 19 * * 1-5 /home/asharma/bin/stock-screener-alert.sh
 15 8 * * 0 /home/asharma/bin/schwab-refresh.sh
 15 7 * * 1-5 /home/asharma/bin/institutions-13f-refresh.sh
+0 8 * * * /home/asharma/bin/vli-research-notes-check.sh
+30 12 * * * /home/asharma/bin/vli-research-notes-check.sh
+0 17 * * * /home/asharma/bin/vli-research-notes-check.sh
 ```
 
 | When (CT) | Mode |
@@ -167,6 +170,7 @@ CRON_TZ=America/Chicago
 | **19:00** | Same full screen again (EOD new-symbol Slack), then the paper book, which can open new athdip entries |
 | **Sunday 08:15** | Rotate the Schwab refresh token (`scripts/schwab-refresh.sh`). Weekday scans already rotate it; this covers a quiet week. A dead login still needs `scripts/schwab_auth.py` on the VM. |
 | **Weekdays 07:15** | Refresh the curated 13F cache on the first weekday after each filing deadline (Feb 14, May 15, Aug 14, Nov 14). Other mornings the script exits without downloading. New-signal alerts then append a `13F:` note for names those managers hold. |
+| **08:00, 12:30, 17:00** | Read new `#vli-research-notes` posts and DM a short crowding note when one changes how dip signals should be read. Quiet runs send nothing. |
 
 Deploy after `git pull` on the VM:
 

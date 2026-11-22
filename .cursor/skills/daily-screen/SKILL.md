@@ -58,12 +58,19 @@ After each dashboard build, `scripts/alert_new_signals.py` diffs current
 
 Near-real-time: on the VM cron, mid-day `*/30` runs **Schwab** athdip watch.
 Full screens at **06:00** and **19:00** CT use `--price-source schwab` (Yahoo only
-when a symbol's Schwab history is missing or short). News, fundamentals, and
+when a symbol's Schwab history is missing or short) and then run
+`scripts/paper_book.py`. The 19:00 run can open new athdip paper entries;
+the 06:00 run only updates exits. A name enters only on the session its 4h RSI
+low printed (`trigger_date`), not on later days it stays listed.
+`scripts/paper_book_backfill.py --start YYYY-MM-DD` replays past sessions from
+Yahoo daily and 4h bars (`--dry-run` to preview). News, fundamentals, and
 earnings dates stay on Yahoo. Sunday 08:15 CT runs `scripts/schwab-refresh.sh`
 to rotate the refresh token. Weekday 07:15 CT runs
 `scripts/institutions-13f-refresh.sh`, which downloads 13F holdings on the first
 weekday after each filing deadline and otherwise does nothing. New-signal alerts
 append a `13F:` note from `output/institutions_13f_history.csv` when that file exists.
+At 08:00, 12:30, and 17:00 CT, `scripts/vli-research-notes-check.sh` reads new
+`#vli-research-notes` posts and DMs a crowding note only when one matters.
 Locally you can still use Cursor `/loop 30m` with this skill or:
 
 ```bash

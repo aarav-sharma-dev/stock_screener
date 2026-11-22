@@ -1,0 +1,13 @@
+---
+description: When creating or updating DV Trading OUTAGE postmortems from Slack
+alwaysApply: true
+---
+
+# Outage postmortem
+
+When the user asks to create/update a PM / postmortem for an `#alert-outage-*` Slack channel (or links an OUTAGE archive URL):
+
+1. **Read and follow** the skill: `.cursor/skills/outage-postmortem/SKILL.md` (also under `~/.cursor/skills/outage-postmortem/`).
+2. **Mandatory:** read the OUTAGE channel fully and **every thread** (`slack_read_thread` for each parent with replies). Do not stop at top-level or “key” threads.
+3. **Mandatory:** chase **related channels** named or linked in-room (desk / `#ztrader_*`, drop-copy, TSE, networking, forwarded permalinks). Search + read those threads for the same incident.
+4. Draft/update Slack Canvas with the mandatory **AI note** near the top (`AI-generated draft from channel / Jira / PD history — review before treating as final.`); label the channel post and Jira comment as AI-assisted; **also** `addOrEditJiraIssueComment` on the OUTAGE ticket (unless user says Slack-only).
