@@ -119,6 +119,35 @@ python3 scripts/build_screen_dashboard.py
 
 That also diffs vs `output/signal_snapshot.json` and alerts when a symbol enters Today's focus or the top of a mode (stdout + macOS notification; Slack if `SCREENER_SLACK_WEBHOOK` is set). Slack shows at most 8 new focus names, then the top 5 of each mode that changed (politicians: 3 buys and 3 sells). Alerts include **BUY/SELL/MIXED** lean plus **daily RSI** (and **4h RSI** when athdip). First run only saves a baseline.
 
+### Paper book (athdip forward test)
+
+After each full screen, `scripts/paper_book.py` updates a forward paper book. It places no orders. Four books share the same athdip triggers:
+
+| Book | Exit | Entry |
+|------|------|-------|
+| `hold10` | Sell 10 sessions after entry | Every trigger |
+| `rsi50` | Sell the first later close with daily RSI(14) > 50 | Every trigger |
+| `hold10_low20` | Same as `hold10` | Only when the trigger-day close is the lowest close of the last 20 sessions |
+| `rsi50_low20` | Same as `rsi50` | Only when the trigger-day close is the lowest close of the last 20 sessions |
+
+Rules shared by all four books:
+
+- A name enters only on the session its 4h RSI low printed (`trigger_date`), at that day's daily close. Later days on the screen do not enter.
+- 10 slots per book, 10 bps per side, and a 20-session time stop.
+- Daily prices come from Schwab. If Schwab fails, the book uses Yahoo daily closes and the run output says Schwab failed.
+
+Files and commands:
+
+```bash
+python3 scripts/paper_book.py --status            # print the saved books
+python3 scripts/paper_book_canvas.py --print      # print the canvas markdown
+python3 scripts/paper_book_backfill.py --start 2026-11-02 --dry-run   # replay from Yahoo bars
+```
+
+- `output/paper_book.json` is the state, and `output/paper_book.csv` is the flat ledger.
+- `paper_book_backfill.py` without `--dry-run` replaces the state, after saving the old file next to it.
+- `paper_book_canvas.py` refreshes a Slack canvas after each book update. It needs a bot token with `canvases:write` that can edit the canvas. A failure is logged and does not change the book.
+
 ### Cron (VM) — Schwab every 30m + Yahoo open/close
 
 Keep your existing crontab; only the **script** switches mid-day to Schwab:
@@ -133,9 +162,9 @@ CRON_TZ=America/Chicago
 
 | When (CT) | Mode |
 |-----------|------|
-| **06:00** | Every mode on the full universe (S&P 500 plus the AI, chip, energy, nuclear, and ETF names). Prices and fundamentals come from **Schwab** only. Schwab has no headline feed, next earnings date, or EPS surprise, so those inputs stay neutral. A rejected Schwab login sends one Slack message per day. Writes `athdip_setups.csv` and `screen_athdip.csv` |
+| **06:00** | Every mode on the full universe (S&P 500 plus the AI, chip, energy, nuclear, and ETF names). Prices and fundamentals come from **Schwab** only. Schwab has no headline feed, next earnings date, or EPS surprise, so those inputs stay neutral. A rejected Schwab login sends one Slack message per day. Writes `athdip_setups.csv` and `screen_athdip.csv`. Then the paper book updates exits only (the cash close is already recorded) |
 | **06:30–18:30** `*/30` | Athdip again on the **full universe** (S&P 500 plus the extra AI, chip, energy, nuclear, and ETF names). Alerts only tickers that were not already in the snapshot |
-| **19:00** | Same full screen again (EOD new-symbol Slack) |
+| **19:00** | Same full screen again (EOD new-symbol Slack), then the paper book, which can open new athdip entries |
 | **Sunday 08:15** | Rotate the Schwab refresh token (`scripts/schwab-refresh.sh`). Weekday scans already rotate it; this covers a quiet week. A dead login still needs `scripts/schwab_auth.py` on the VM. |
 | **Weekdays 07:15** | Refresh the curated 13F cache on the first weekday after each filing deadline (Feb 14, May 15, Aug 14, Nov 14). Other mornings the script exits without downloading. New-signal alerts then append a `13F:` note for names those managers hold. |
 
