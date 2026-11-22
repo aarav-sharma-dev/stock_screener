@@ -128,6 +128,8 @@ run_full_screen() {
     --output output/screen.csv \
     2>&1 | tee -a "$LOG" || log "WARN: screener exited $?"
   $PY scripts/build_screen_dashboard.py 2>&1 | tee -a "$LOG" || log "WARN: dashboard exited $?"
+  # Paper book: seed or mark the athdip paper books. Morning runs only update exits.
+  $PY scripts/paper_book.py 2>&1 | tee -a "$LOG" || log "WARN: paper book exited $?"
   log "Full screen done"
 }
 
