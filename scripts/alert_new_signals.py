@@ -43,6 +43,7 @@ import platform
 import subprocess
 import sys
 from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -107,8 +108,8 @@ def _fnum(x) -> float | None:
         return None
 
 
-def _tickers_from_csv(path: Path) -> list[str]:
-    if not path.exists():
+def _tickers_from_csv(path: Path | None) -> list[str]:
+    if path is None or not path.is_file():
         return []
     try:
         df = pd.read_csv(path)
@@ -127,15 +128,40 @@ def _tickers_from_csv(path: Path) -> list[str]:
     return out
 
 
+def _chicago_day(mtime: float) -> str:
+    return datetime.fromtimestamp(mtime, ZoneInfo("America/Chicago")).strftime("%Y-%m-%d")
+
+
+def _current_run_day(output: Path) -> str | None:
+    """Chicago date of the newest screen file. Older days are a previous run."""
+    candidates: list[Path] = []
+    for mode in MODES:
+        path = output / f"screen_{mode}.csv"
+        if path.is_file():
+            candidates.append(path)
+    for name in ("screen.csv", "today_focus.csv"):
+        path = output / name
+        if path.is_file():
+            candidates.append(path)
+    if not candidates:
+        return None
+    newest = max(candidates, key=lambda path: path.stat().st_mtime)
+    return _chicago_day(newest.stat().st_mtime)
+
+
 def _mode_csv(output: Path, mode: str) -> Path | None:
+    """Mode CSV from the same Chicago day as the newest screen file."""
     path = output / f"screen_{mode}.csv"
-    if path.exists():
-        return path
-    if mode == "support":
+    if not path.is_file() and mode == "support":
         alt = output / "screen.csv"
-        if alt.exists():
-            return alt
-    return None
+        if alt.is_file():
+            path = alt
+    if not path.is_file():
+        return None
+    day = _current_run_day(output)
+    if day is None or _chicago_day(path.stat().st_mtime) != day:
+        return None
+    return path
 
 
 def _score_series(df: pd.DataFrame) -> pd.Series:
@@ -208,11 +234,15 @@ def _book_mode(book: str) -> str:
 
 
 def _metrics_from_modes(output: Path) -> dict[str, dict]:
-    """Best-effort RSI / politician flow per ticker from screen_*.csv."""
+    """RSI / politician flow per ticker from this run's screen_*.csv files.
+
+    A name in athdip keeps that row's daily and 4h RSI. Other modes only fill
+    daily RSI when athdip did not.
+    """
     metrics: dict[str, dict] = {}
     for mode in MODES:
-        path = output / f"screen_{mode}.csv"
-        if not path.exists():
+        path = _mode_csv(output, mode)
+        if path is None:
             continue
         try:
             df = pd.read_csv(path)
@@ -226,13 +256,15 @@ def _metrics_from_modes(output: Path) -> dict[str, dict]:
                 continue
             m = metrics.setdefault(t, {})
             rsi = _fnum(row.get("rsi14"))
-            if rsi is not None:
-                m.setdefault("rsi14", rsi)
             if mode == "athdip":
+                if rsi is not None:
+                    m["rsi14"] = rsi
                 rsi4 = _fnum(row.get("rsi_4h"))
                 # ScreenRow defaults rsi_4h=50 for non-athdip; only trust athdip rows
                 if rsi4 is not None:
                     m["rsi4h"] = rsi4
+            elif rsi is not None:
+                m.setdefault("rsi14", rsi)
             if mode == "pead":
                 ear = _fnum(row.get("ear_pct"))
                 sur = _fnum(row.get("surprise_pct"))
@@ -284,17 +316,18 @@ def _fmt_rsi(rsi14: float | None, rsi4h: float | None) -> str:
 def collect_current(output: Path = OUTPUT) -> dict:
     by_mode: dict[str, list[str]] = {}
     for mode in MODES:
-        path = output / f"screen_{mode}.csv"
-        if not path.exists() and mode == "support":
-            alt = output / "screen.csv"
-            if alt.exists():
-                path = alt
-        by_mode[mode] = _tickers_from_csv(path)
+        by_mode[mode] = _tickers_from_csv(_mode_csv(output, mode))
 
     metrics = _metrics_from_modes(output)
     focus_rows: list[dict] = []
     focus_path = output / "today_focus.csv"
-    if focus_path.exists():
+    focus_day = _current_run_day(output)
+    focus_fresh = (
+        focus_path.is_file()
+        and focus_day is not None
+        and _chicago_day(focus_path.stat().st_mtime) == focus_day
+    )
+    if focus_fresh:
         try:
             df = pd.read_csv(focus_path)
             for _, row in df.iterrows():
@@ -313,9 +346,13 @@ def collect_current(output: Path = OUTPUT) -> dict:
                         kind, tags, pol_buys=buys, pol_sells=sells
                     )
                 rsi14 = _fnum(row.get("rsi14"))
-                if rsi14 is None:
-                    rsi14 = metrics.get(t, {}).get("rsi14")
                 rsi4h = _fnum(row.get("rsi4h"))
+                if t in (by_mode.get("athdip") or []):
+                    # Athdip row is the dip signal; focus can carry another mode's RSI.
+                    rsi14 = metrics.get(t, {}).get("rsi14", rsi14)
+                    rsi4h = metrics.get(t, {}).get("rsi4h", rsi4h)
+                elif rsi14 is None:
+                    rsi14 = metrics.get(t, {}).get("rsi14")
                 if rsi4h is None:
                     rsi4h = metrics.get(t, {}).get("rsi4h")
                 focus_rows.append(

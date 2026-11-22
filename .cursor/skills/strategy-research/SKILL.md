@@ -76,7 +76,7 @@ ThinkScript lives in `docs/thinkscript/`:
 
 | Strategy | Scan (Stock Hacker) | Chart study | Setup doc |
 |----------|---------------------|-------------|-----------|
-| Athdip | `athdip_scan.ts` (**4h** agg) | `athdip_study.ts` | `ATHDIP_STOCKHACKER.md` |
+| Athdip | `athdip_scan.ts` (**4h** agg) | `athdip_study.ts` + Day `athdip_exits_study.ts` | `ATHDIP_STOCKHACKER.md` |
 | Connors RSI(2) | `connors_rsi2_scan.ts` (**Day**) | `connors_rsi2_study.ts` | `CONNORS_RSI2_STOCKHACKER.md` |
 
 Outputs: `output/*compare*.csv`, `output/athdip_*`, `output/athdip_robustness_*.csv`,
@@ -94,7 +94,7 @@ Outputs: `output/*compare*.csv`, `output/athdip_*`, `output/athdip_robustness_*.
   The best dips were in the Q1 correction when momentum gates were off.
 - **Exits** (position sim, 1/10 slots): hold-10 +28.8% (70 trades, avg +3.8%),
   RSI14>50 exit +25.2% (73% win), hold-1 +9.3%. Longer holds are cost-robust.
-  → candidate for forward test, not yet in thinkScript.
+  → forward paper book is `scripts/paper_book.py` (hold-10 and RSI14>50, 10 bps/side, trigger-day entries only); `scripts/paper_book_backfill.py` replays past dates. Exits are not in thinkScript yet.
 - **PEAD** (4,051 S&P 500 prints 2024→): PROD bucket 20d +0.21% (t 0.6), 60d
   +0.37% (t 0.6); nothing |t|>2. Large-cap PEAD is a watchlist, not an edge.
 - **Iran / oil-shock** (`scripts/experiment_iran_oil_shock.py`, war window from

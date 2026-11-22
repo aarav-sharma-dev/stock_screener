@@ -352,12 +352,24 @@ def series_for(prices: pd.DataFrame, field: str, ticker: str) -> pd.Series:
     if prices.empty:
         return pd.Series(dtype=float)
     if isinstance(prices.columns, pd.MultiIndex):
+        # A missing ticker must not fall through to prices["Close"]. On a
+        # MultiIndex that selects every Close column and crashes _last().
+        key = None
         if (field, ticker) in prices.columns:
-            return prices[(field, ticker)].dropna()
-        if (ticker, field) in prices.columns:
-            return prices[(ticker, field)].dropna()
+            key = (field, ticker)
+        elif (ticker, field) in prices.columns:
+            key = (ticker, field)
+        if key is None:
+            return pd.Series(dtype=float)
+        got = prices.loc[:, key]
+        if isinstance(got, pd.DataFrame):
+            got = got.iloc[:, 0]
+        return got.dropna()
     if field in prices.columns:
-        return prices[field].dropna()
+        got = prices[field]
+        if isinstance(got, pd.DataFrame):
+            return pd.Series(dtype=float)
+        return got.dropna()
     return pd.Series(dtype=float)
 
 
